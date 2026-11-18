@@ -2,15 +2,19 @@
 
 package win32
 
-import "unsafe"
+import (
+	"math"
+	"time"
+	"unsafe"
+)
 
 const (
 	timerResizeID   = 1
 	timerTrayAnimID = 2
 
-	resizeSteps   = 8
-	trayAnimSteps = 11
-	animTickMs    = 14
+	animTickMs         = 7 // ~142 FPS with timeBeginPeriod(1)
+	trayAnimDuration   = 185 * time.Millisecond
+	resizeAnimDuration = 140 * time.Millisecond
 
 	wsExLayered = 0x00080000
 	lwaAlpha    = 0x00000002
@@ -26,11 +30,11 @@ const (
 )
 
 type resizeAnimState struct {
-	active  bool
-	step    int
-	startH  int32
-	targetH int32
-	winW    int32
+	active    bool
+	startTime time.Time
+	startH    int32
+	targetH   int32
+	winW      int32
 }
 
 type trayAnimMode int
@@ -42,19 +46,52 @@ const (
 )
 
 type trayAnimState struct {
-	mode     trayAnimMode
-	step     int
-	fromRect rect
-	toRect   rect
+	mode      trayAnimMode
+	startTime time.Time
+	fromX     int32
+	fromY     int32
+	toX       int32
+	toY       int32
 }
 
-// MinimizeToTray smoothly animates the window toward the system tray icon and hides it.
+func (c *Controller) beginHighResTimer() {
+	if !c.timerPeriodOn && procTimeBeginPeriod.Find() == nil {
+		procTimeBeginPeriod.Call(1)
+		c.timerPeriodOn = true
+	}
+}
+
+func (c *Controller) endHighResTimer() {
+	if c.timerPeriodOn && procTimeEndPeriod.Find() == nil {
+		procTimeEndPeriod.Call(1)
+		c.timerPeriodOn = false
+	}
+}
+
+func (c *Controller) trayGlideOffset(base rect) (int32, int32) {
+	tray := c.getTrayIconRect()
+	scx := float64(base.Left+base.Right) / 2.0
+	scy := float64(base.Top+base.Bottom) / 2.0
+	tcx := float64(tray.Left+tray.Right) / 2.0
+	tcy := float64(tray.Top+tray.Bottom) / 2.0
+
+	dx := tcx - scx
+	dy := tcy - scy
+	dist := math.Hypot(dx, dy)
+	if dist < 1 {
+		return 0, 80
+	}
+	glide := math.Min(110.0, dist)
+	return int32(math.Round(dx / dist * glide)), int32(math.Round(dy / dist * glide))
+}
+
+// MinimizeToTray smoothly glides and fades the window toward the system tray icon at high FPS.
 func (c *Controller) MinimizeToTray() {
+	c.revealed = true
 	if c.hidden || c.trayAnim.mode == trayAnimMinimize {
 		return
 	}
 
-	// Cancel any in-progress height animation cleanly.
 	if c.resizeAnim.active {
 		c.resizeAnim.active = false
 		procKillTimer.Call(c.hwnd, timerResizeID)
@@ -66,26 +103,29 @@ func (c *Controller) MinimizeToTray() {
 		c.savedRect = cur
 	}
 
-	target := c.getTrayIconRect()
+	offX, offY := c.trayGlideOffset(c.savedRect)
 
-	// Enable WS_EX_LAYERED for smooth alpha fade.
 	exStyle := getWindowLongPtr(c.hwnd, gwlExStyle)
 	if (exStyle & wsExLayered) == 0 {
 		setWindowLongPtr(c.hwnd, gwlExStyle, exStyle|wsExLayered)
 	}
 	procSetLayeredWindowAttributes.Call(c.hwnd, 0, 255, lwaAlpha)
 
+	c.beginHighResTimer()
 	c.trayAnim = trayAnimState{
-		mode:     trayAnimMinimize,
-		step:     0,
-		fromRect: cur,
-		toRect:   target,
+		mode:      trayAnimMinimize,
+		startTime: time.Now(),
+		fromX:     c.savedRect.Left,
+		fromY:     c.savedRect.Top,
+		toX:       c.savedRect.Left + offX,
+		toY:       c.savedRect.Top + offY,
 	}
 	procSetTimer.Call(c.hwnd, timerTrayAnimID, animTickMs, 0)
 }
 
-// RestoreFromTray smoothly animates the window back from the system tray and focuses it.
+// RestoreFromTray smoothly glides and fades the window back from the system tray at high FPS.
 func (c *Controller) RestoreFromTray() {
+	c.revealed = true
 	if !c.hidden && c.trayAnim.mode != trayAnimMinimize {
 		procSetForegroundWindow.Call(c.hwnd)
 		return
@@ -97,42 +137,32 @@ func (c *Controller) RestoreFromTray() {
 		c.savedRect = cur
 	}
 
-	start := c.getTrayIconRect()
-	// Give the starting rect a small minimal footprint near the tray so WebView2 paints cleanly.
-	startW := (c.savedRect.Right - c.savedRect.Left) / 3
-	startH := (c.savedRect.Bottom - c.savedRect.Top) / 3
-	if startW < 100 {
-		startW = 100
-	}
-	if startH < 60 {
-		startH = 60
-	}
-	startRect := rect{
-		Left:   start.Left - startW/2,
-		Top:    start.Top - startH,
-		Right:  start.Left + startW/2,
-		Bottom: start.Top,
-	}
+	offX, offY := c.trayGlideOffset(c.savedRect)
+	startX := c.savedRect.Left + offX
+	startY := c.savedRect.Top + offY
 
 	exStyle := getWindowLongPtr(c.hwnd, gwlExStyle)
 	if (exStyle & wsExLayered) == 0 {
 		setWindowLongPtr(c.hwnd, gwlExStyle, exStyle|wsExLayered)
 	}
-	procSetLayeredWindowAttributes.Call(c.hwnd, 0, 10, lwaAlpha)
+	procSetLayeredWindowAttributes.Call(c.hwnd, 0, 0, lwaAlpha)
 	procSetWindowPos.Call(
 		c.hwnd, 0,
-		uintptr(startRect.Left), uintptr(startRect.Top),
-		uintptr(startRect.Right-startRect.Left), uintptr(startRect.Bottom-startRect.Top),
-		swpNoZOrder|swpNoActivate,
+		uintptr(startX), uintptr(startY),
+		0, 0,
+		swpNoSize|swpNoZOrder|swpNoActivate,
 	)
 	procShowWindow.Call(c.hwnd, swShow)
 
 	c.hidden = false
+	c.beginHighResTimer()
 	c.trayAnim = trayAnimState{
-		mode:     trayAnimRestore,
-		step:     0,
-		fromRect: startRect,
-		toRect:   c.savedRect,
+		mode:      trayAnimRestore,
+		startTime: time.Now(),
+		fromX:     startX,
+		fromY:     startY,
+		toX:       c.savedRect.Left,
+		toY:       c.savedRect.Top,
 	}
 	procSetTimer.Call(c.hwnd, timerTrayAnimID, animTickMs, 0)
 }
@@ -149,11 +179,16 @@ func (c *Controller) ToggleTrayVisibility() {
 func (c *Controller) stepTrayAnimation() {
 	if c.trayAnim.mode == trayAnimNone {
 		procKillTimer.Call(c.hwnd, timerTrayAnimID)
+		if !c.resizeAnim.active {
+			c.endHighResTimer()
+		}
 		return
 	}
 
-	c.trayAnim.step++
-	t := float64(c.trayAnim.step) / float64(trayAnimSteps)
+	t := float64(time.Since(c.trayAnim.startTime)) / float64(trayAnimDuration)
+	if t < 0 {
+		t = 0
+	}
 	if t > 1 {
 		t = 1
 	}
@@ -161,63 +196,55 @@ func (c *Controller) stepTrayAnimation() {
 	var ease float64
 	var alpha uint8
 	if c.trayAnim.mode == trayAnimMinimize {
-		// Cubic ease-in toward tray.
+		// Smooth cubic ease-in glide + fade out.
 		ease = t * t * t
-		alpha = uint8(255.0 * (1.0 - t*t))
+		alpha = uint8(math.Round(255.0 * (1.0 - t*t)))
 	} else {
-		// Cubic ease-out back to saved normal bounds.
+		// Smooth cubic ease-out glide + fade in.
 		inv := 1.0 - t
 		ease = 1.0 - inv*inv*inv
-		alpha = uint8(10.0 + 245.0*ease)
+		alpha = uint8(math.Round(255.0 * ease))
 	}
 
-	r := lerpRect(c.trayAnim.fromRect, c.trayAnim.toRect, ease)
-	w := r.Right - r.Left
-	h := r.Bottom - r.Top
-	if w < 16 {
-		w = 16
-	}
-	if h < 16 {
-		h = 16
-	}
+	x := c.trayAnim.fromX + int32(math.Round(float64(c.trayAnim.toX-c.trayAnim.fromX)*ease))
+	y := c.trayAnim.fromY + int32(math.Round(float64(c.trayAnim.toY-c.trayAnim.fromY)*ease))
 
 	procSetLayeredWindowAttributes.Call(c.hwnd, 0, uintptr(alpha), lwaAlpha)
-	procSetWindowPos.Call(c.hwnd, 0, uintptr(r.Left), uintptr(r.Top), uintptr(w), uintptr(h), swpNoZOrder|swpNoActivate)
+	procSetWindowPos.Call(c.hwnd, 0, uintptr(x), uintptr(y), 0, 0, swpNoSize|swpNoZOrder|swpNoActivate)
 
-	if c.trayAnim.step >= trayAnimSteps {
+	if t >= 1 {
 		procKillTimer.Call(c.hwnd, timerTrayAnimID)
 		completedMode := c.trayAnim.mode
 		c.trayAnim.mode = trayAnimNone
+		if !c.resizeAnim.active {
+			c.endHighResTimer()
+		}
 
 		if completedMode == trayAnimMinimize {
 			procShowWindow.Call(c.hwnd, swHide)
 			c.hidden = true
-			// Restore normal window dimensions while hidden so the next restore starts crisp.
+			// Snap back to saved position while hidden so next restore starts cleanly.
 			procSetWindowPos.Call(
 				c.hwnd, 0,
 				uintptr(c.savedRect.Left), uintptr(c.savedRect.Top),
-				uintptr(c.savedRect.Right-c.savedRect.Left), uintptr(c.savedRect.Bottom-c.savedRect.Top),
-				swpNoZOrder|swpNoActivate,
+				0, 0,
+				swpNoSize|swpNoZOrder|swpNoActivate,
 			)
 		} else {
 			procSetWindowPos.Call(
 				c.hwnd, 0,
 				uintptr(c.savedRect.Left), uintptr(c.savedRect.Top),
-				uintptr(c.savedRect.Right-c.savedRect.Left), uintptr(c.savedRect.Bottom-c.savedRect.Top),
-				swpNoZOrder,
+				0, 0,
+				swpNoSize|swpNoZOrder,
 			)
 			procSetForegroundWindow.Call(c.hwnd)
 			c.SetAlwaysOnTop(c.alwaysOnTop)
 		}
 
-		// Cleanly restore opacity and remove layered style when idle.
 		procSetLayeredWindowAttributes.Call(c.hwnd, 0, 255, lwaAlpha)
 		exStyle := getWindowLongPtr(c.hwnd, gwlExStyle)
 		if (exStyle & wsExLayered) != 0 {
 			setWindowLongPtr(c.hwnd, gwlExStyle, exStyle&^wsExLayered)
-		}
-		if c.callbacks.OnResizeNeeded != nil {
-			c.callbacks.OnResizeNeeded()
 		}
 	}
 }
@@ -225,23 +252,31 @@ func (c *Controller) stepTrayAnimation() {
 func (c *Controller) stepResizeAnimation() {
 	if !c.resizeAnim.active {
 		procKillTimer.Call(c.hwnd, timerResizeID)
+		if c.trayAnim.mode == trayAnimNone {
+			c.endHighResTimer()
+		}
 		return
 	}
 
-	c.resizeAnim.step++
-	t := float64(c.resizeAnim.step) / float64(resizeSteps)
+	t := float64(time.Since(c.resizeAnim.startTime)) / float64(resizeAnimDuration)
+	if t < 0 {
+		t = 0
+	}
 	if t > 1 {
 		t = 1
 	}
 	inv := 1.0 - t
 	ease := 1.0 - inv*inv*inv
 
-	h := c.resizeAnim.startH + int32(float64(c.resizeAnim.targetH-c.resizeAnim.startH)*ease)
+	h := c.resizeAnim.startH + int32(math.Round(float64(c.resizeAnim.targetH-c.resizeAnim.startH)*ease))
 	procSetWindowPos.Call(c.hwnd, 0, 0, 0, uintptr(c.resizeAnim.winW), uintptr(h), swpNoMove|swpNoZOrder|swpNoActivate)
 
-	if c.resizeAnim.step >= resizeSteps {
+	if t >= 1 {
 		procKillTimer.Call(c.hwnd, timerResizeID)
 		c.resizeAnim.active = false
+		if c.trayAnim.mode == trayAnimNone {
+			c.endHighResTimer()
+		}
 		procSetWindowPos.Call(c.hwnd, 0, 0, 0, uintptr(c.resizeAnim.winW), uintptr(c.resizeAnim.targetH), swpNoMove|swpNoZOrder|swpNoActivate)
 		var rc rect
 		procGetWindowRect.Call(c.hwnd, uintptr(unsafe.Pointer(&rc)))
@@ -249,17 +284,5 @@ func (c *Controller) stepResizeAnimation() {
 		if c.callbacks.OnResizeNeeded != nil {
 			c.callbacks.OnResizeNeeded()
 		}
-	}
-}
-
-func lerpRect(a, b rect, t float64) rect {
-	lerp := func(x, y int32) int32 {
-		return x + int32(float64(y-x)*t)
-	}
-	return rect{
-		Left:   lerp(a.Left, b.Left),
-		Top:    lerp(a.Top, b.Top),
-		Right:  lerp(a.Right, b.Right),
-		Bottom: lerp(a.Bottom, b.Bottom),
 	}
 }

@@ -118,7 +118,7 @@ func (a *App) Run(debug bool) error {
 	savedX, savedY := a.state.WindowX, a.state.WindowY
 	a.mu.Unlock()
 
-	win32.InstallStartupHook(initialTheme != "light")
+	win32.InstallStartupHook(initialTheme != "light", savedX, savedY, fixedWidth, initialH)
 
 	w := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:     debug,
@@ -273,7 +273,7 @@ func (a *App) Run(debug bool) error {
 	a.winCtrl.SetDarkMode(initialTheme != "light")
 
 	// Fallback reveal in case WebView2 navigation or DOM ready is delayed.
-	revealFallback := time.AfterFunc(1500*time.Millisecond, func() {
+	revealFallback := time.AfterFunc(3000*time.Millisecond, func() {
 		w.Dispatch(func() {
 			if a.winCtrl != nil {
 				a.winCtrl.RevealWindow()

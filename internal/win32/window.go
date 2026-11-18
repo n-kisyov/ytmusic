@@ -4,6 +4,7 @@ package win32
 
 import (
 	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -13,7 +14,10 @@ const (
 	wmDestroy         = 0x0002
 	wmClose           = 0x0010
 	wmQueryEndSession = 0x0011
+	wmEraseBkgnd      = 0x0014
 	wmEndSession      = 0x0016
+	wmShowWindow      = 0x0018
+	wmWindowPosChanging = 0x0046
 	wmCommand         = 0x0111
 	wmSysCommand      = 0x0112
 	wmTimer           = 0x0113
@@ -87,15 +91,16 @@ type Controller struct {
 	hwnd        uintptr
 	origWndProc uintptr
 	hIcon       uintptr
-	trayAdded   bool
-	hidden      bool
-	alwaysOnTop bool
-	revealed    bool
-	quitting    bool
-	savedRect   rect
-	resizeAnim  resizeAnimState
-	trayAnim    trayAnimState
-	callbacks   Callbacks
+	trayAdded       bool
+	hidden          bool
+	alwaysOnTop     bool
+	revealed        bool
+	timerPeriodOn   bool
+	quitting        bool
+	savedRect       rect
+	resizeAnim      resizeAnimState
+	trayAnim        trayAnimState
+	callbacks       Callbacks
 }
 
 var (
@@ -114,6 +119,7 @@ var (
 	procAdjustWindowRectEx        = user32.NewProc("AdjustWindowRectEx")
 	procAdjustWindowRectExForDpi  = user32.NewProc("AdjustWindowRectExForDpi")
 	procGetDpiForWindow           = user32.NewProc("GetDpiForWindow")
+	procGetDpiForSystem           = user32.NewProc("GetDpiForSystem")
 	procFindWindowW               = user32.NewProc("FindWindowW")
 	procFindWindowExW             = user32.NewProc("FindWindowExW")
 	procSystemParametersInfoW     = user32.NewProc("SystemParametersInfoW")
@@ -129,23 +135,102 @@ var (
 	kernel32               = windows.NewLazySystemDLL("kernel32.dll")
 	procGetCurrentThreadId = kernel32.NewProc("GetCurrentThreadId")
 
+	winmm               = windows.NewLazySystemDLL("winmm.dll")
+	procTimeBeginPeriod = winmm.NewProc("timeBeginPeriod")
+	procTimeEndPeriod   = winmm.NewProc("timeEndPeriod")
+
 	dwmapi                  = windows.NewLazySystemDLL("dwmapi.dll")
 	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
 )
 
+type createStructW struct {
+	LpCreateParams uintptr
+	HInstance      uintptr
+	HMenu          uintptr
+	HwndParent     uintptr
+	Cy             int32
+	Cx             int32
+	Y              int32
+	X              int32
+	Style          int32
+	LpszName       *uint16
+	LpszClass      uintptr
+	DwExStyle      uint32
+}
+
+type cbtCreateWndW struct {
+	Lpcs            *createStructW
+	HwndInsertAfter uintptr
+}
+
 var (
-	ctrlMu        sync.RWMutex
-	controllers   = make(map[uintptr]*Controller)
-	wndProcCB     = windows.NewCallback(subclassWndProc)
-	cbtHookCB     = windows.NewCallback(startupCBTHookProc)
-	startupHookMu sync.Mutex
-	startupHookH  uintptr
-	startupDark   bool
+	ctrlMu           sync.RWMutex
+	controllers      = make(map[uintptr]*Controller)
+	wndProcCB        = windows.NewCallback(subclassWndProc)
+	cbtHookCB        uintptr
+	startupWndProcCB uintptr
+	startupCBOnce    sync.Once
+	startupHookMu    sync.Mutex
+	startupHookH     uintptr
+	startupDark      bool
+	startupRect      rect
+	startupTarget    uintptr
+	startupOrigProc  uintptr
 )
 
-// InstallStartupHook installs a thread-local WH_CBT hook that makes the initial "webview"
-// window transparent (alpha=0) and applies DWM theme before ShowWindow runs, preventing any white flash.
-func InstallStartupHook(dark bool) {
+// ComputeInitialWindowRect computes the exact physical window bounds for the given logical
+// client size and saved top-left position (centering on primary work area if unset or offscreen).
+func ComputeInitialWindowRect(savedX, savedY, logicalW, logicalH int) (int32, int32, int32, int32) {
+	dpi := 96
+	if procGetDpiForSystem.Find() == nil {
+		if d, _, _ := procGetDpiForSystem.Call(); d > 0 {
+			dpi = int(d)
+		}
+	}
+	physW := (logicalW*dpi + 48) / 96
+	physH := (logicalH*dpi + 48) / 96
+
+	style := uintptr(0x00CF0000) &^ (wsThickFrame | wsMaximizeBox)
+	exStyle := uintptr(wsExLayered)
+	r := rect{Left: 0, Top: 0, Right: int32(physW), Bottom: int32(physH)}
+	if procAdjustWindowRectExForDpi.Find() == nil {
+		procAdjustWindowRectExForDpi.Call(uintptr(unsafe.Pointer(&r)), style, 0, exStyle, uintptr(dpi))
+	} else {
+		procAdjustWindowRectEx.Call(uintptr(unsafe.Pointer(&r)), style, 0, exStyle)
+	}
+	winW := int(r.Right - r.Left)
+	winH := int(r.Bottom - r.Top)
+
+	var wa rect
+	procSystemParametersInfoW.Call(48 /* SPI_GETWORKAREA */, 0, uintptr(unsafe.Pointer(&wa)), 0)
+
+	vx, _, _ := procGetSystemMetrics.Call(76 /* SM_XVIRTUALSCREEN */)
+	vy, _, _ := procGetSystemMetrics.Call(77 /* SM_YVIRTUALSCREEN */)
+	vw, _, _ := procGetSystemMetrics.Call(78 /* SM_CXVIRTUALSCREEN */)
+	vh, _, _ := procGetSystemMetrics.Call(79 /* SM_CYVIRTUALSCREEN */)
+
+	minX := int(int32(vx))
+	minY := int(int32(vy))
+	maxX := minX + int(int32(vw)) - 100
+	maxY := minY + int(int32(vh)) - 60
+
+	x, y := savedX, savedY
+	if (x == -1 && y == -1) || x < minX || y < minY || x > maxX || y > maxY {
+		x = int(wa.Left) + (int(wa.Right-wa.Left)-winW)/2
+		y = int(wa.Top) + (int(wa.Bottom-wa.Top)-winH)/2
+	}
+	return int32(x), int32(y), int32(winW), int32(winH)
+}
+
+// InstallStartupHook installs a thread-local WH_CBT hook that applies WS_EX_LAYERED,
+// exact saved position/size, non-resizable styles, and DWM theme directly to CREATESTRUCTW
+// before CreateWindowExW / ShowWindow runs, preventing any startup white flash or jump.
+func InstallStartupHook(dark bool, savedX, savedY, logicalW, logicalH int) {
+	startupCBOnce.Do(func() {
+		cbtHookCB = windows.NewCallback(startupCBTHookProc)
+		startupWndProcCB = windows.NewCallback(startupPreShowWndProc)
+	})
+
 	startupHookMu.Lock()
 	defer startupHookMu.Unlock()
 
@@ -153,55 +238,115 @@ func InstallStartupHook(dark bool) {
 		procUnhookWindowsHookEx.Call(startupHookH)
 		startupHookH = 0
 	}
+	x, y, w, h := ComputeInitialWindowRect(savedX, savedY, logicalW, logicalH)
+	startupRect = rect{Left: x, Top: y, Right: x + w, Bottom: y + h}
 	startupDark = dark
+	startupTarget = 0
+
 	tid, _, _ := procGetCurrentThreadId.Call()
-	h, _, _ := procSetWindowsHookExW.Call(5 /* WH_CBT */, cbtHookCB, 0, tid)
-	startupHookH = h
+	hHook, _, _ := procSetWindowsHookExW.Call(5 /* WH_CBT */, cbtHookCB, 0, tid)
+	startupHookH = hHook
 }
 
-func startupCBTHookProc(nCode int32, wParam, lParam uintptr) uintptr {
+func unhookStartupHook() {
+	startupHookMu.Lock()
+	if startupHookH != 0 {
+		procUnhookWindowsHookEx.Call(startupHookH)
+		startupHookH = 0
+	}
+	target := startupTarget
+	orig := startupOrigProc
+	startupTarget = 0
+	startupOrigProc = 0
+	startupHookMu.Unlock()
+
+	if target != 0 && orig != 0 && getWindowLongPtr(target, gwlpWndProc) == startupWndProcCB {
+		setWindowLongPtr(target, gwlpWndProc, orig)
+	}
+}
+
+func startupPreShowWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
+	startupHookMu.Lock()
+	target := startupTarget
+	orig := startupOrigProc
+	startupHookMu.Unlock()
+
+	if hwnd == target && (msg == wmShowWindow || msg == wmWindowPosChanging) {
+		exStyle := getWindowLongPtr(hwnd, gwlExStyle)
+		if (exStyle & wsExLayered) == 0 {
+			setWindowLongPtr(hwnd, gwlExStyle, exStyle|wsExLayered)
+		}
+		procSetLayeredWindowAttributes.Call(hwnd, 0, 0, lwaAlpha)
+		unhookStartupHook()
+	}
+
+	if orig != 0 {
+		ret, _, _ := procCallWindowProcW.Call(orig, hwnd, msg, wParam, lParam)
+		return ret
+	}
+	return 0
+}
+
+func startupCBTHookProc(nCode int32, wParam uintptr, lParam unsafe.Pointer) uintptr {
 	startupHookMu.Lock()
 	hHook := startupHookH
 	isDark := startupDark
+	initRect := startupRect
+	target := startupTarget
 	startupHookMu.Unlock()
 
-	if nCode == 3 /* HCBT_CREATEWND */ && wParam != 0 {
+	if nCode == 3 /* HCBT_CREATEWND */ && wParam != 0 && lParam != nil && target == 0 {
 		var buf [64]uint16
 		n, _, _ := procGetClassNameW.Call(wParam, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
 		if n > 0 && windows.UTF16ToString(buf[:n]) == "webview" {
-			exStyle := getWindowLongPtr(wParam, gwlExStyle)
-			setWindowLongPtr(wParam, gwlExStyle, exStyle|wsExLayered)
-			procSetLayeredWindowAttributes.Call(wParam, 0, 0, lwaAlpha)
+			cbt := (*cbtCreateWndW)(lParam)
+			if cbt != nil && cbt.Lpcs != nil && cbt.Lpcs.HwndParent == 0 {
+				cbt.Lpcs.X = initRect.Left
+				cbt.Lpcs.Y = initRect.Top
+				cbt.Lpcs.Cx = initRect.Right - initRect.Left
+				cbt.Lpcs.Cy = initRect.Bottom - initRect.Top
 
-			style := getWindowLongPtr(wParam, gwlStyle)
-			setWindowLongPtr(wParam, gwlStyle, style&^(wsThickFrame|wsMaximizeBox))
+				style := getWindowLongPtr(wParam, gwlStyle)
+				setWindowLongPtr(wParam, gwlStyle, style&^(wsThickFrame|wsMaximizeBox))
 
-			if procDwmSetWindowAttribute.Find() == nil {
-				val := uint32(0)
-				if isDark {
-					val = 1
+				// Subclass immediately so WM_SHOWWINDOW/WM_WINDOWPOSCHANGING applies WS_EX_LAYERED
+				// with alpha=0 after CreateWindowExW finishes and before ShowWindow draws a pixel.
+				orig := setWindowLongPtr(wParam, gwlpWndProc, startupWndProcCB)
+
+				startupHookMu.Lock()
+				startupTarget = wParam
+				startupOrigProc = orig
+				if startupHookH != 0 {
+					procUnhookWindowsHookEx.Call(startupHookH)
+					startupHookH = 0
 				}
-				procDwmSetWindowAttribute.Call(wParam, dwmwaUseImmersiveDarkMode, uintptr(unsafe.Pointer(&val)), unsafe.Sizeof(val))
-				round := uint32(dwmwcpRound)
-				procDwmSetWindowAttribute.Call(wParam, dwmwaWindowCornerPreference, uintptr(unsafe.Pointer(&round)), unsafe.Sizeof(round))
-			}
+				startupHookMu.Unlock()
 
-			startupHookMu.Lock()
-			if startupHookH != 0 {
-				procUnhookWindowsHookEx.Call(startupHookH)
-				startupHookH = 0
+				if procDwmSetWindowAttribute.Find() == nil {
+					val := uint32(0)
+					if isDark {
+						val = 1
+					}
+					procDwmSetWindowAttribute.Call(wParam, dwmwaUseImmersiveDarkMode, uintptr(unsafe.Pointer(&val)), unsafe.Sizeof(val))
+					round := uint32(dwmwcpRound)
+					procDwmSetWindowAttribute.Call(wParam, dwmwaWindowCornerPreference, uintptr(unsafe.Pointer(&round)), unsafe.Sizeof(round))
+				}
 			}
-			startupHookMu.Unlock()
 		}
 	}
 
-	ret, _, _ := procCallNextHookEx.Call(hHook, uintptr(nCode), wParam, lParam)
+	ret, _, _ := procCallNextHookEx.Call(hHook, uintptr(nCode), wParam, uintptr(lParam))
 	return ret
 }
 
 // NewController attaches Win32 non-resizable styling, Windows 11 DWM theme, tray icon, and WndProc hooks.
 func NewController(hwnd unsafe.Pointer, cb Callbacks) *Controller {
-	h := uintptr(hwnd)
+	return newController(uintptr(hwnd), cb)
+}
+
+func newController(h uintptr, cb Callbacks) *Controller {
+	unhookStartupHook()
+
 	c := &Controller{
 		hwnd:      h,
 		callbacks: cb,
@@ -226,16 +371,13 @@ func NewController(hwnd unsafe.Pointer, cb Callbacks) *Controller {
 }
 
 func (c *Controller) applyWindowChrome() {
-	// Make window strictly non-resizable and disable maximize button.
+	// Ensure window is strictly non-resizable with layered alpha preserved until RevealWindow.
 	style := getWindowLongPtr(c.hwnd, gwlStyle)
 	style &^= (wsThickFrame | wsMaximizeBox)
 	setWindowLongPtr(c.hwnd, gwlStyle, style)
 	procSetWindowPos.Call(c.hwnd, 0, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoZOrder|swpNoActivate|swpFrameChanged)
 
-	// Enable Windows 11 dark title bar & rounded corners.
 	if procDwmSetWindowAttribute.Find() == nil {
-		dark := uint32(1)
-		procDwmSetWindowAttribute.Call(c.hwnd, dwmwaUseImmersiveDarkMode, uintptr(unsafe.Pointer(&dark)), unsafe.Sizeof(dark))
 		round := uint32(dwmwcpRound)
 		procDwmSetWindowAttribute.Call(c.hwnd, dwmwaWindowCornerPreference, uintptr(unsafe.Pointer(&round)), unsafe.Sizeof(round))
 	}
@@ -327,12 +469,13 @@ func (c *Controller) SetClientSize(logicalW, logicalH int, animate bool) {
 		return
 	}
 
+	c.beginHighResTimer()
 	c.resizeAnim = resizeAnimState{
-		active:  true,
-		step:    0,
-		startH:  curH,
-		targetH: winH,
-		winW:    winW,
+		active:    true,
+		startTime: time.Now(),
+		startH:    curH,
+		targetH:   winH,
+		winW:      winW,
 	}
 	procSetTimer.Call(c.hwnd, timerResizeID, animTickMs, 0)
 }
@@ -381,6 +524,7 @@ func (c *Controller) BeginQuit() {
 	c.quitting = true
 	procKillTimer.Call(c.hwnd, timerResizeID)
 	procKillTimer.Call(c.hwnd, timerTrayAnimID)
+	c.endHighResTimer()
 	c.unregisterMediaHotKeys()
 	c.removeTray()
 	procDestroyWindow.Call(c.hwnd)
@@ -417,6 +561,9 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	}
 
 	switch msg {
+	case wmEraseBkgnd:
+		return 1
+
 	case wmClose:
 		if !c.quitting {
 			c.MinimizeToTray()
@@ -564,6 +711,7 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		}
 
 	case wmDestroy:
+		c.endHighResTimer()
 		c.unregisterMediaHotKeys()
 		c.removeTray()
 		ctrlMu.Lock()
