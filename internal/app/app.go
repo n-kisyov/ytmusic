@@ -118,6 +118,8 @@ func (a *App) Run(debug bool) error {
 	savedX, savedY := a.state.WindowX, a.state.WindowY
 	a.mu.Unlock()
 
+	win32.InstallStartupHook(initialTheme != "light")
+
 	w := webview2.NewWithOptions(webview2.WebViewOptions{
 		Debug:     debug,
 		DataPath:  dataDir,
@@ -269,6 +271,16 @@ func (a *App) Run(debug bool) error {
 	a.winCtrl.SetWindowPosition(savedX, savedY)
 	a.winCtrl.SetAlwaysOnTop(initialAlwaysOnTop)
 	a.winCtrl.SetDarkMode(initialTheme != "light")
+
+	// Fallback reveal in case WebView2 navigation or DOM ready is delayed.
+	revealFallback := time.AfterFunc(1500*time.Millisecond, func() {
+		w.Dispatch(func() {
+			if a.winCtrl != nil {
+				a.winCtrl.RevealWindow()
+			}
+		})
+	})
+	defer revealFallback.Stop()
 
 	a.updateTrayTitleLocked()
 	w.Navigate(a.server.BaseURL() + "/")
@@ -506,6 +518,17 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		if a.winCtrl != nil {
 			w.Dispatch(func() {
 				a.winCtrl.SetDarkMode(theme != "light")
+			})
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendShowWindow", func() error {
+		if a.winCtrl != nil {
+			w.Dispatch(func() {
+				a.winCtrl.RevealWindow()
 			})
 		}
 		return nil

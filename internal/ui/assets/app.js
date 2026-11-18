@@ -1282,6 +1282,14 @@
       }
     } catch (err) {
       showToast('Startup init warning');
+    } finally {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (typeof window.backendShowWindow === 'function') {
+            window.backendShowWindow().catch(() => {});
+          }
+        });
+      });
     }
   });
 })();

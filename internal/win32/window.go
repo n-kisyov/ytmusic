@@ -90,6 +90,7 @@ type Controller struct {
 	trayAdded   bool
 	hidden      bool
 	alwaysOnTop bool
+	revealed    bool
 	quitting    bool
 	savedRect   rect
 	resizeAnim  resizeAnimState
@@ -120,16 +121,83 @@ var (
 	procDestroyWindow             = user32.NewProc("DestroyWindow")
 	procRegisterHotKey            = user32.NewProc("RegisterHotKey")
 	procUnregisterHotKey          = user32.NewProc("UnregisterHotKey")
+	procSetWindowsHookExW         = user32.NewProc("SetWindowsHookExW")
+	procUnhookWindowsHookEx       = user32.NewProc("UnhookWindowsHookEx")
+	procCallNextHookEx            = user32.NewProc("CallNextHookEx")
+	procGetClassNameW             = user32.NewProc("GetClassNameW")
+
+	kernel32               = windows.NewLazySystemDLL("kernel32.dll")
+	procGetCurrentThreadId = kernel32.NewProc("GetCurrentThreadId")
 
 	dwmapi                  = windows.NewLazySystemDLL("dwmapi.dll")
 	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
 )
 
 var (
-	ctrlMu      sync.RWMutex
-	controllers = make(map[uintptr]*Controller)
-	wndProcCB   = windows.NewCallback(subclassWndProc)
+	ctrlMu        sync.RWMutex
+	controllers   = make(map[uintptr]*Controller)
+	wndProcCB     = windows.NewCallback(subclassWndProc)
+	cbtHookCB     = windows.NewCallback(startupCBTHookProc)
+	startupHookMu sync.Mutex
+	startupHookH  uintptr
+	startupDark   bool
 )
+
+// InstallStartupHook installs a thread-local WH_CBT hook that makes the initial "webview"
+// window transparent (alpha=0) and applies DWM theme before ShowWindow runs, preventing any white flash.
+func InstallStartupHook(dark bool) {
+	startupHookMu.Lock()
+	defer startupHookMu.Unlock()
+
+	if startupHookH != 0 {
+		procUnhookWindowsHookEx.Call(startupHookH)
+		startupHookH = 0
+	}
+	startupDark = dark
+	tid, _, _ := procGetCurrentThreadId.Call()
+	h, _, _ := procSetWindowsHookExW.Call(5 /* WH_CBT */, cbtHookCB, 0, tid)
+	startupHookH = h
+}
+
+func startupCBTHookProc(nCode int32, wParam, lParam uintptr) uintptr {
+	startupHookMu.Lock()
+	hHook := startupHookH
+	isDark := startupDark
+	startupHookMu.Unlock()
+
+	if nCode == 3 /* HCBT_CREATEWND */ && wParam != 0 {
+		var buf [64]uint16
+		n, _, _ := procGetClassNameW.Call(wParam, uintptr(unsafe.Pointer(&buf[0])), uintptr(len(buf)))
+		if n > 0 && windows.UTF16ToString(buf[:n]) == "webview" {
+			exStyle := getWindowLongPtr(wParam, gwlExStyle)
+			setWindowLongPtr(wParam, gwlExStyle, exStyle|wsExLayered)
+			procSetLayeredWindowAttributes.Call(wParam, 0, 0, lwaAlpha)
+
+			style := getWindowLongPtr(wParam, gwlStyle)
+			setWindowLongPtr(wParam, gwlStyle, style&^(wsThickFrame|wsMaximizeBox))
+
+			if procDwmSetWindowAttribute.Find() == nil {
+				val := uint32(0)
+				if isDark {
+					val = 1
+				}
+				procDwmSetWindowAttribute.Call(wParam, dwmwaUseImmersiveDarkMode, uintptr(unsafe.Pointer(&val)), unsafe.Sizeof(val))
+				round := uint32(dwmwcpRound)
+				procDwmSetWindowAttribute.Call(wParam, dwmwaWindowCornerPreference, uintptr(unsafe.Pointer(&round)), unsafe.Sizeof(round))
+			}
+
+			startupHookMu.Lock()
+			if startupHookH != 0 {
+				procUnhookWindowsHookEx.Call(startupHookH)
+				startupHookH = 0
+			}
+			startupHookMu.Unlock()
+		}
+	}
+
+	ret, _, _ := procCallNextHookEx.Call(hHook, uintptr(nCode), wParam, lParam)
+	return ret
+}
 
 // NewController attaches Win32 non-resizable styling, Windows 11 DWM theme, tray icon, and WndProc hooks.
 func NewController(hwnd unsafe.Pointer, cb Callbacks) *Controller {
@@ -288,6 +356,24 @@ func (c *Controller) SetDarkMode(dark bool) {
 		}
 		procDwmSetWindowAttribute.Call(c.hwnd, dwmwaUseImmersiveDarkMode, uintptr(unsafe.Pointer(&val)), unsafe.Sizeof(val))
 	}
+}
+
+// RevealWindow restores full opacity after startup initialization and first UI frame paint complete.
+func (c *Controller) RevealWindow() {
+	if c.revealed {
+		return
+	}
+	c.revealed = true
+	if c.hidden || c.trayAnim.mode != trayAnimNone {
+		return
+	}
+	procSetLayeredWindowAttributes.Call(c.hwnd, 0, 255, lwaAlpha)
+	exStyle := getWindowLongPtr(c.hwnd, gwlExStyle)
+	if (exStyle & wsExLayered) != 0 {
+		setWindowLongPtr(c.hwnd, gwlExStyle, exStyle&^wsExLayered)
+	}
+	procSetForegroundWindow.Call(c.hwnd)
+	c.SetAlwaysOnTop(c.alwaysOnTop)
 }
 
 // BeginQuit marks the window as exiting, cleans up tray icon, and triggers WM_CLOSE destruction.
