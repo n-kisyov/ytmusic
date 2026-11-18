@@ -45,9 +45,10 @@ const (
 	wsThickFrame  = 0x00040000
 	wsMaximizeBox = 0x00010000
 
-	dwmwaUseImmersiveDarkMode    = 20
-	dwmwaWindowCornerPreference  = 33
-	dwmwcpRound                  = 2
+	dwmwaCloak                  = 13
+	dwmwaUseImmersiveDarkMode   = 20
+	dwmwaWindowCornerPreference = 33
+	dwmwcpRound                 = 2
 
 	hwndTopMost   = ^uintptr(0) // -1
 	hwndNoTopMost = ^uintptr(1) // -2
@@ -113,6 +114,8 @@ var (
 	procShowWindow                = user32.NewProc("ShowWindow")
 	procSendMessageW              = user32.NewProc("SendMessageW")
 	procPostMessageW              = user32.NewProc("PostMessageW")
+	procGetClientRect             = user32.NewProc("GetClientRect")
+	procFillRect                  = user32.NewProc("FillRect")
 	procSetTimer                  = user32.NewProc("SetTimer")
 	procKillTimer                 = user32.NewProc("KillTimer")
 	procSetLayeredWindowAttributes = user32.NewProc("SetLayeredWindowAttributes")
