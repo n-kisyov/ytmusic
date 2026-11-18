@@ -340,7 +340,7 @@ html, body {
 .now-playing {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 7px;
   min-width: 0;
 }
 
@@ -403,6 +403,42 @@ html, body {
   padding: 2px 8px;
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
+}
+
+.vu-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 5px;
+  border-radius: 6px;
+  background: var(--yt-bg-raised);
+  border: 1px solid var(--yt-border);
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.vu-meter:hover {
+  border-color: var(--yt-text-disabled);
+}
+
+.vu-labels {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  height: 14px;
+  font-size: 8px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--yt-text-secondary);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.2px;
+}
+
+.vu-canvas {
+  width: 44px;
+  height: 14px;
+  display: block;
 }
 
 /* YouTube Scrub Progress Bar */

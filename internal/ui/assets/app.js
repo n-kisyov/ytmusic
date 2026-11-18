@@ -26,6 +26,8 @@
   const heartOutlineIcon = document.getElementById('heart-outline-icon');
   const heartFilledIcon = document.getElementById('heart-filled-icon');
   const trackCounter = document.getElementById('track-counter');
+  const vuMeter = document.getElementById('vu-meter');
+  const vuCanvas = document.getElementById('vu-canvas');
 
   const timeElapsed = document.getElementById('time-elapsed');
   const timeTotal = document.getElementById('time-total');
@@ -97,6 +99,7 @@
     loggedIn: false,
     accountName: '',
     toastTimer: null,
+    vuStyle: 'led', // 'led' | 'bar'
   };
 
   function showToast(msg) {
@@ -203,6 +206,7 @@
     sunIcon.classList.toggle('hidden', isLight);
     moonIcon.classList.toggle('hidden', !isLight);
     themeBtn.title = isLight ? 'Switch to Dark theme (T)' : 'Switch to Light theme (T)';
+    drawVuMeter();
   }
 
   function applyAuthUI(auth) {
@@ -245,6 +249,244 @@
       updateMediaSessionMetadata(null);
     }
     updateLikeButtonUI();
+  }
+
+  // --- Minimalistic Stereo (L/R) VU & Peak Meter ---
+  const vu = {
+    audioCtx: null,
+    sourceNode: null,
+    splitter: null,
+    analyserL: null,
+    analyserR: null,
+    bufL: null,
+    bufR: null,
+    graphAttached: false,
+    attachInFlight: false,
+    rafId: 0,
+    lastTs: 0,
+    levelL: 0,
+    levelR: 0,
+    peakL: 0,
+    peakR: 0,
+    holdL: 0,
+    holdR: 0,
+    ctx2d: vuCanvas ? vuCanvas.getContext('2d') : null,
+  };
+
+  function attachStereoAnalyserNodes() {
+    if (vu.graphAttached || !vu.audioCtx || vu.audioCtx.state !== 'running') return;
+    try {
+      vu.sourceNode = vu.audioCtx.createMediaElementSource(media);
+      vu.splitter = vu.audioCtx.createChannelSplitter(2);
+      vu.analyserL = vu.audioCtx.createAnalyser();
+      vu.analyserR = vu.audioCtx.createAnalyser();
+      vu.analyserL.fftSize = 512;
+      vu.analyserR.fftSize = 512;
+      vu.analyserL.smoothingTimeConstant = 0.5;
+      vu.analyserR.smoothingTimeConstant = 0.5;
+      vu.bufL = new Float32Array(vu.analyserL.fftSize);
+      vu.bufR = new Float32Array(vu.analyserR.fftSize);
+
+      vu.sourceNode.connect(vu.audioCtx.destination);
+      vu.sourceNode.connect(vu.splitter);
+      vu.splitter.connect(vu.analyserL, 0);
+      vu.splitter.connect(vu.analyserR, 1);
+      vu.graphAttached = true;
+    } catch (_) {
+      // Ignore if MediaElementSource cannot attach cleanly
+    }
+  }
+
+  function ensureAudioAnalyser() {
+    if (vu.graphAttached) return;
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+
+    if (!vu.audioCtx) {
+      try {
+        vu.audioCtx = new AudioCtx();
+      } catch (_) {
+        return;
+      }
+    }
+
+    if (vu.audioCtx.state === 'running') {
+      attachStereoAnalyserNodes();
+      return;
+    }
+
+    if (!vu.attachInFlight) {
+      vu.attachInFlight = true;
+      vu.audioCtx.resume().then(() => {
+        vu.attachInFlight = false;
+        attachStereoAnalyserNodes();
+      }).catch(() => {
+        vu.attachInFlight = false;
+      });
+    }
+  }
+
+  function measureChannelLevel(analyser, buf) {
+    analyser.getFloatTimeDomainData(buf);
+    let sumSq = 0;
+    let peak = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const s = buf[i];
+      sumSq += s * s;
+      const abs = s < 0 ? -s : s;
+      if (abs > peak) peak = abs;
+    }
+    const rms = Math.sqrt(sumSq / buf.length);
+    const amp = Math.max(rms * 1.45, peak * 0.85);
+    if (amp <= 0.0001) return 0;
+    const db = 20 * Math.log10(amp);
+    return Math.max(0, Math.min(1, (db + 38) / 37));
+  }
+
+  function getVuPalette() {
+    const isLight = state.theme === 'light';
+    return {
+      unlit: isLight ? 'rgba(0, 0, 0, 0.12)' : 'rgba(255, 255, 255, 0.12)',
+      green: isLight ? '#0f7b0f' : '#2ba640',
+      amber: isLight ? '#d97706' : '#f5a623',
+      red: isLight ? '#e60000' : '#ff0000',
+    };
+  }
+
+  function vuZoneColor(norm, palette) {
+    if (norm >= 0.8) return palette.red;
+    if (norm >= 0.62) return palette.amber;
+    return palette.green;
+  }
+
+  function drawVuChannel(ctx, y, h, level, peak, palette, grad) {
+    const width = 44;
+    if (state.vuStyle === 'bar') {
+      ctx.fillStyle = palette.unlit;
+      ctx.fillRect(0, y, width, h);
+      const fillW = Math.max(0, Math.min(width, level * width));
+      if (fillW > 0.5) {
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, y, fillW, h);
+      }
+      if (peak > 0.02) {
+        const peakX = Math.max(0, Math.min(width - 1.5, peak * width - 1.5));
+        ctx.fillStyle = vuZoneColor(peak, palette);
+        ctx.fillRect(peakX, y, 1.5, h);
+      }
+      return;
+    }
+
+    const segments = 11;
+    const segW = 3;
+    const gap = 1;
+    const litCount = level > 0.02 ? Math.max(1, Math.round(level * segments)) : 0;
+    const peakIdx = peak > 0.02 ? Math.min(segments - 1, Math.max(0, Math.ceil(peak * segments) - 1)) : -1;
+
+    for (let i = 0; i < segments; i++) {
+      const x = i * (segW + gap);
+      const active = i < litCount || i === peakIdx;
+      if (!active) {
+        ctx.fillStyle = palette.unlit;
+      } else if (i >= 9) {
+        ctx.fillStyle = palette.red;
+      } else if (i >= 7) {
+        ctx.fillStyle = palette.amber;
+      } else {
+        ctx.fillStyle = palette.green;
+      }
+      ctx.fillRect(x, y, segW, h);
+    }
+  }
+
+  function drawVuMeter() {
+    if (!vuCanvas || !vu.ctx2d) return;
+    const cssW = 44;
+    const cssH = 14;
+    const dpr = Math.min(3, window.devicePixelRatio || 1);
+    const targetW = Math.round(cssW * dpr);
+    const targetH = Math.round(cssH * dpr);
+    if (vuCanvas.width !== targetW || vuCanvas.height !== targetH) {
+      vuCanvas.width = targetW;
+      vuCanvas.height = targetH;
+    }
+
+    const ctx = vu.ctx2d;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const palette = getVuPalette();
+    let grad = null;
+    if (state.vuStyle === 'bar') {
+      grad = ctx.createLinearGradient(0, 0, cssW, 0);
+      grad.addColorStop(0, palette.green);
+      grad.addColorStop(0.65, palette.green);
+      grad.addColorStop(0.82, palette.amber);
+      grad.addColorStop(1, palette.red);
+    }
+
+    drawVuChannel(ctx, 1, 5, vu.levelL, vu.peakL, palette, grad);
+    drawVuChannel(ctx, 8, 5, vu.levelR, vu.peakR, palette, grad);
+  }
+
+  function updateChannelBallistics(levelKey, peakKey, holdKey, target, step) {
+    const cur = vu[levelKey];
+    if (target > cur) {
+      vu[levelKey] = cur + (target - cur) * Math.min(1, 0.55 * step);
+    } else {
+      vu[levelKey] = Math.max(target, cur - 0.045 * step);
+    }
+
+    if (vu[levelKey] >= vu[peakKey]) {
+      vu[peakKey] = vu[levelKey];
+      vu[holdKey] = 20;
+    } else if (vu[holdKey] > 0) {
+      vu[holdKey] = Math.max(0, vu[holdKey] - step);
+    } else {
+      vu[peakKey] = Math.max(0, vu[peakKey] - 0.018 * step);
+    }
+  }
+
+  function tickVuMeter(ts) {
+    const dtMs = vu.lastTs > 0 ? Math.min(50, Math.max(4, ts - vu.lastTs)) : 16.6667;
+    vu.lastTs = ts;
+    const step = dtMs / 16.6667;
+
+    const playing = !media.paused && !media.ended && media.readyState >= 2;
+    const audible = playing && !state.muted && state.volume > 0.001;
+
+    let targetL = 0;
+    let targetR = 0;
+    if (audible) {
+      if (vu.graphAttached && vu.analyserL && vu.analyserR) {
+        targetL = measureChannelLevel(vu.analyserL, vu.bufL);
+        targetR = measureChannelLevel(vu.analyserR, vu.bufR);
+      } else {
+        // Gentle idle pulse only while AudioContext awaits first user gesture during autoplay
+        const phase = ts * 0.0045;
+        targetL = Math.max(0.08, Math.min(0.45, (0.24 + 0.14 * Math.sin(phase) + 0.06 * Math.sin(phase * 2.3)) * state.volume));
+        targetR = Math.max(0.08, Math.min(0.45, (0.24 + 0.14 * Math.sin(phase + 0.9) + 0.06 * Math.cos(phase * 1.9)) * state.volume));
+      }
+    }
+
+    updateChannelBallistics('levelL', 'peakL', 'holdL', targetL, step);
+    updateChannelBallistics('levelR', 'peakR', 'holdR', targetR, step);
+    drawVuMeter();
+
+    if (playing || vu.levelL > 0.002 || vu.levelR > 0.002 || vu.peakL > 0.002 || vu.peakR > 0.002) {
+      vu.rafId = requestAnimationFrame(tickVuMeter);
+    } else {
+      vu.rafId = 0;
+      vu.lastTs = 0;
+    }
+  }
+
+  function startVuMeterLoop() {
+    ensureAudioAnalyser();
+    if (!vu.rafId) {
+      vu.lastTs = 0;
+      vu.rafId = requestAnimationFrame(tickVuMeter);
+    }
   }
 
   function updateTabsUI() {
@@ -896,6 +1138,22 @@
 
   themeBtn.addEventListener('click', toggleTheme);
 
+  if (vuMeter) {
+    vuMeter.addEventListener('click', () => {
+      state.vuStyle = state.vuStyle === 'led' ? 'bar' : 'led';
+      vuMeter.title = `Stereo VU Meter (${state.vuStyle === 'led' ? 'LED' : 'Bar'}) — Click to switch style`;
+      drawVuMeter();
+    });
+  }
+
+  function unlockAudioContextOnGesture() {
+    if (!vu.graphAttached && !media.paused && !media.ended) {
+      ensureAudioAnalyser();
+    }
+  }
+  document.addEventListener('pointerdown', unlockAudioContextOnGesture);
+  document.addEventListener('keydown', unlockAudioContextOnGesture);
+
   tabQueue.addEventListener('click', () => {
     state.activeTab = 'queue';
     renderActiveDrawerView(true);
@@ -1064,11 +1322,16 @@
     }, 900);
   });
 
+  media.addEventListener('play', () => {
+    startVuMeterLoop();
+  });
+
   media.addEventListener('playing', () => {
     state.consecutiveErrors = 0;
     clearErrorSkipTimer();
     videoLoading.classList.add('hidden');
     updatePlayButtonUI();
+    startVuMeterLoop();
     pushPlaybackState();
   });
 
