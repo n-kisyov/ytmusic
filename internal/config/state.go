@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Track represents a playable YouTube song/video item in the playlist.
@@ -190,6 +191,11 @@ func normalizeAppState(s *AppState) {
 	if s.SavedPlaylists == nil {
 		s.SavedPlaylists = []SavedPlaylist{}
 	}
+	for i := range s.SavedPlaylists {
+		if s.SavedPlaylists[i].Tracks == nil {
+			s.SavedPlaylists[i].Tracks = []Track{}
+		}
+	}
 	switch s.RepeatMode {
 	case "off", "all", "one":
 	default:
@@ -228,6 +234,108 @@ func normalizeAppState(s *AppState) {
 	if s.PositionSec < 0 {
 		s.PositionSec = 0
 	}
+}
+
+func (s *AppState) findSavedPlaylistIndex(name string) int {
+	for i := range s.SavedPlaylists {
+		if strings.EqualFold(s.SavedPlaylists[i].Name, name) {
+			return i
+		}
+	}
+	return -1
+}
+
+// CreatePlaylist creates a new named playlist (empty or populated) or merges unique tracks if the name exists.
+func (s *AppState) CreatePlaylist(name string, tracks []Track) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return fmt.Errorf("playlist name cannot be empty")
+	}
+	clean := make([]Track, 0, len(tracks))
+	seen := make(map[string]struct{}, len(tracks))
+	for _, tr := range tracks {
+		if tr.ID == "" {
+			continue
+		}
+		if _, dup := seen[tr.ID]; dup {
+			continue
+		}
+		seen[tr.ID] = struct{}{}
+		clean = append(clean, tr)
+	}
+
+	if idx := s.findSavedPlaylistIndex(name); idx >= 0 {
+		existing := &s.SavedPlaylists[idx]
+		have := make(map[string]struct{}, len(existing.Tracks))
+		for _, tr := range existing.Tracks {
+			if tr.ID != "" {
+				have[tr.ID] = struct{}{}
+			}
+		}
+		for _, tr := range clean {
+			if _, ok := have[tr.ID]; ok {
+				continue
+			}
+			have[tr.ID] = struct{}{}
+			existing.Tracks = append(existing.Tracks, tr)
+		}
+		return nil
+	}
+
+	sp := SavedPlaylist{
+		Name:      name,
+		Tracks:    clean,
+		CreatedAt: time.Now().Unix(),
+	}
+	s.SavedPlaylists = append([]SavedPlaylist{sp}, s.SavedPlaylists...)
+	return nil
+}
+
+// AddTrackToPlaylist appends a track to the named playlist (creating it if missing), avoiding duplicate IDs.
+func (s *AppState) AddTrackToPlaylist(name string, track Track) (bool, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return false, fmt.Errorf("playlist name cannot be empty")
+	}
+	if track.ID == "" {
+		return false, fmt.Errorf("track id cannot be empty")
+	}
+
+	idx := s.findSavedPlaylistIndex(name)
+	if idx < 0 {
+		sp := SavedPlaylist{
+			Name:      name,
+			Tracks:    []Track{track},
+			CreatedAt: time.Now().Unix(),
+		}
+		s.SavedPlaylists = append([]SavedPlaylist{sp}, s.SavedPlaylists...)
+		return true, nil
+	}
+
+	for _, existing := range s.SavedPlaylists[idx].Tracks {
+		if existing.ID == track.ID {
+			return false, nil
+		}
+	}
+	s.SavedPlaylists[idx].Tracks = append(s.SavedPlaylists[idx].Tracks, track)
+	return true, nil
+}
+
+// RemoveTrackFromPlaylist removes all entries with trackID from the named playlist.
+func (s *AppState) RemoveTrackFromPlaylist(name, trackID string) error {
+	name = strings.TrimSpace(name)
+	idx := s.findSavedPlaylistIndex(name)
+	if idx < 0 {
+		return nil
+	}
+	filtered := make([]Track, 0, len(s.SavedPlaylists[idx].Tracks))
+	for _, tr := range s.SavedPlaylists[idx].Tracks {
+		if tr.ID != trackID {
+			filtered = append(filtered, tr)
+		}
+	}
+	s.SavedPlaylists[idx].Tracks = filtered
+	return nil
 }
 
 // SaveAppState saves state.json atomically to %APPDATA%\ytmusic\state.json.

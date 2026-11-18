@@ -63,14 +63,23 @@
   const tabQueue = document.getElementById('tab-queue');
   const tabLiked = document.getElementById('tab-liked');
   const tabSaved = document.getElementById('tab-saved');
+  const drawerTabsScroll = document.getElementById('drawer-tabs-scroll');
+  const customPlaylistTabs = document.getElementById('custom-playlist-tabs');
   const saveQueueBtn = document.getElementById('save-queue-btn');
   const saveQueueBar = document.getElementById('save-queue-bar');
   const saveQueueInput = document.getElementById('save-queue-input');
   const saveQueueConfirm = document.getElementById('save-queue-confirm');
+  const saveEmptyConfirm = document.getElementById('save-empty-confirm');
   const saveQueueCancel = document.getElementById('save-queue-cancel');
   const filterRow = document.getElementById('filter-row');
   const playlistFilter = document.getElementById('playlist-filter');
   const playLikedBtn = document.getElementById('play-liked-btn');
+  const addPlaylistPopover = document.getElementById('add-playlist-popover');
+  const addPlaylistClose = document.getElementById('add-playlist-close');
+  const addPlaylistTrack = document.getElementById('add-playlist-track');
+  const addPlaylistList = document.getElementById('add-playlist-list');
+  const addPlaylistForm = document.getElementById('add-playlist-form');
+  const addPlaylistInput = document.getElementById('add-playlist-input');
 
   const state = {
     playlist: [],
@@ -100,6 +109,7 @@
     accountName: '',
     toastTimer: null,
     vuStyle: 'led', // 'led' | 'bar'
+    popoverTrack: null,
   };
 
   function showToast(msg) {
@@ -190,6 +200,9 @@
     state.playlistExpanded = expanded;
     playlistDrawer.classList.toggle('open', expanded);
     playlistToggleBtn.classList.toggle('active', expanded);
+    if (!expanded) {
+      closeAddToPlaylistPopover();
+    }
   }
 
   function applyAlwaysOnTopUI(enabled) {
@@ -508,7 +521,31 @@
 
   drawVuMeter();
 
+  const CUSTOM_TAB_PREFIX = 'playlist:';
+
+  function getSelectedSavedPlaylistName() {
+    return state.activeTab.startsWith(CUSTOM_TAB_PREFIX)
+      ? state.activeTab.slice(CUSTOM_TAB_PREFIX.length)
+      : '';
+  }
+
+  function findSavedPlaylist(name) {
+    if (!name) return null;
+    const lower = name.toLowerCase();
+    return state.savedPlaylists.find((sp) => (sp.name || '').toLowerCase() === lower) || null;
+  }
+
+  function playlistContainsTrack(sp, trackID) {
+    return Boolean(trackID) && Array.isArray(sp?.tracks) && sp.tracks.some((t) => t.id === trackID);
+  }
+
   function updateTabsUI() {
+    const customName = getSelectedSavedPlaylistName();
+    const selectedSp = customName ? findSavedPlaylist(customName) : null;
+    if (customName && !selectedSp) {
+      state.activeTab = 'queue';
+    }
+
     tabQueue.classList.toggle('active', state.activeTab === 'queue');
     tabLiked.classList.toggle('active', state.activeTab === 'liked');
     tabSaved.classList.toggle('active', state.activeTab === 'saved');
@@ -517,9 +554,39 @@
     tabLiked.textContent = state.likedTracks.length > 0 ? `Liked (${state.likedTracks.length})` : 'Liked ♥';
     tabSaved.textContent = state.savedPlaylists.length > 0 ? `Saved (${state.savedPlaylists.length})` : 'Saved';
 
+    if (customPlaylistTabs) {
+      customPlaylistTabs.innerHTML = '';
+      const frag = document.createDocumentFragment();
+      state.savedPlaylists.forEach((sp) => {
+        const count = Array.isArray(sp.tracks) ? sp.tracks.length : 0;
+        const pill = document.createElement('button');
+        pill.type = 'button';
+        pill.className = 'tab-pill' + (selectedSp && sp.name.toLowerCase() === selectedSp.name.toLowerCase() ? ' active' : '');
+        pill.textContent = `${sp.name} (${count})`;
+        pill.title = `${sp.name} (${count} song${count === 1 ? '' : 's'})`;
+        pill.addEventListener('click', () => {
+          closeAddToPlaylistPopover();
+          state.activeTab = CUSTOM_TAB_PREFIX + sp.name;
+          renderActiveDrawerView(false);
+          const activePill = customPlaylistTabs.querySelector('.tab-pill.active');
+          if (activePill) {
+            activePill.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+          }
+        });
+        frag.appendChild(pill);
+      });
+      customPlaylistTabs.appendChild(frag);
+    }
+
     filterRow.classList.toggle('hidden', state.activeTab === 'saved');
-    playLikedBtn.classList.toggle('hidden', state.activeTab !== 'liked' || state.likedTracks.length === 0);
-    saveQueueBtn.classList.toggle('hidden', state.playlist.length === 0);
+    const canPlayCollection =
+      (state.activeTab === 'liked' && state.likedTracks.length > 0) ||
+      Boolean(selectedSp && Array.isArray(selectedSp.tracks) && selectedSp.tracks.length > 0);
+    playLikedBtn.classList.toggle('hidden', !canPlayCollection);
+    saveQueueBtn.classList.remove('hidden');
+    if (saveQueueConfirm) {
+      saveQueueConfirm.classList.toggle('hidden', state.playlist.length === 0);
+    }
   }
 
   function matchesFilter(tr) {
@@ -536,6 +603,23 @@
     if (state.activeTab === 'saved') {
       renderSavedPlaylists();
       return;
+    }
+
+    const customName = getSelectedSavedPlaylistName();
+    if (customName) {
+      const sp = findSavedPlaylist(customName);
+      if (sp) {
+        const tracks = Array.isArray(sp.tracks) ? sp.tracks : [];
+        const filtered = tracks.filter(matchesFilter);
+        playlistEmpty.textContent = tracks.length === 0
+          ? `"${sp.name}" is empty. Click + on any song in Queue to add tracks here.`
+          : 'No songs match your filter.';
+        playlistEmpty.classList.toggle('hidden', filtered.length > 0);
+        const frag = document.createDocumentFragment();
+        filtered.forEach((tr, idx) => frag.appendChild(createCustomPlaylistRow(sp.name, tr, idx)));
+        playlistList.appendChild(frag);
+        return;
+      }
     }
 
     if (state.activeTab === 'liked') {
@@ -588,14 +672,48 @@
     updateNowPlayingHeader();
   }
 
-  function createQueueRow(tr, idx) {
+  function makeActionButton(className, title, text, onClick) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = className;
+    btn.title = title;
+    btn.textContent = text;
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      onClick(btn, e);
+    });
+    return btn;
+  }
+
+  function makeLikeRowButton(tr) {
+    const liked = isTrackLiked(tr.id);
+    return makeActionButton(
+      'row-act-btn' + (liked ? ' liked' : ''),
+      liked ? 'Unlike' : 'Like',
+      liked ? '♥' : '♡',
+      () => toggleTrackLike(tr)
+    );
+  }
+
+  function makeAddPlaylistRowButton(tr) {
+    return makeActionButton(
+      'row-act-btn add-pl-btn',
+      'Add to playlist',
+      '+',
+      (btn) => openAddToPlaylistPopover(tr, btn)
+    );
+  }
+
+  function buildTrackRow({ tr, displayIndex, active, buttons, onRowClick, datasetIndex }) {
     const row = document.createElement('div');
-    row.className = 'track-item' + (idx === state.currentIndex ? ' active' : '');
-    row.dataset.index = String(idx);
+    row.className = 'track-item' + (active ? ' active' : '');
+    if (datasetIndex !== undefined) {
+      row.dataset.index = String(datasetIndex);
+    }
 
     const idxEl = document.createElement('div');
     idxEl.className = 'track-idx';
-    idxEl.textContent = idx === state.currentIndex ? '▶' : String(idx + 1);
+    idxEl.textContent = active ? '▶' : String(displayIndex + 1);
 
     const img = document.createElement('img');
     img.className = 'track-item-thumb';
@@ -620,41 +738,7 @@
 
     const actions = document.createElement('div');
     actions.className = 'track-actions';
-
-    const rowLike = document.createElement('button');
-    rowLike.type = 'button';
-    const liked = isTrackLiked(tr.id);
-    rowLike.className = 'row-act-btn' + (liked ? ' liked' : '');
-    rowLike.title = liked ? 'Unlike' : 'Like';
-    rowLike.textContent = liked ? '♥' : '♡';
-    rowLike.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      await toggleTrackLike(tr);
-    });
-
-    const rowNext = document.createElement('button');
-    rowNext.type = 'button';
-    rowNext.className = 'row-act-btn';
-    rowNext.title = 'Play next';
-    rowNext.textContent = '⤵';
-    rowNext.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      await moveTrackPlayNext(idx);
-    });
-
-    const rowRemove = document.createElement('button');
-    rowRemove.type = 'button';
-    rowRemove.className = 'row-act-btn danger';
-    rowRemove.title = 'Remove from queue';
-    rowRemove.textContent = '×';
-    rowRemove.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      await removeTrackFromQueue(idx);
-    });
-
-    actions.appendChild(rowLike);
-    actions.appendChild(rowNext);
-    actions.appendChild(rowRemove);
+    buttons.forEach((btn) => actions.appendChild(btn));
 
     row.appendChild(idxEl);
     row.appendChild(img);
@@ -662,71 +746,59 @@
     row.appendChild(dur);
     row.appendChild(actions);
 
-    row.addEventListener('click', () => {
-      playTrackAt(idx, true);
-    });
+    row.addEventListener('click', onRowClick);
     return row;
+  }
+
+  function isTrackCurrentlyPlaying(tr) {
+    return state.currentIndex >= 0 && state.playlist[state.currentIndex]?.id === tr.id;
+  }
+
+  function createQueueRow(tr, idx) {
+    return buildTrackRow({
+      tr,
+      displayIndex: idx,
+      active: idx === state.currentIndex,
+      datasetIndex: idx,
+      buttons: [
+        makeLikeRowButton(tr),
+        makeAddPlaylistRowButton(tr),
+        makeActionButton('row-act-btn', 'Play next', '⤵', () => moveTrackPlayNext(idx)),
+        makeActionButton('row-act-btn danger', 'Remove from queue', '×', () => removeTrackFromQueue(idx)),
+      ],
+      onRowClick: () => playTrackAt(idx, true),
+    });
   }
 
   function createLikedRow(tr, idx) {
-    const row = document.createElement('div');
-    const isPlayingThis = state.currentIndex >= 0 && state.playlist[state.currentIndex]?.id === tr.id;
-    row.className = 'track-item' + (isPlayingThis ? ' active' : '');
-
-    const idxEl = document.createElement('div');
-    idxEl.className = 'track-idx';
-    idxEl.textContent = isPlayingThis ? '▶' : String(idx + 1);
-
-    const img = document.createElement('img');
-    img.className = 'track-item-thumb';
-    img.loading = 'lazy';
-    img.src = tr.thumbnail || '';
-    img.alt = '';
-
-    const info = document.createElement('div');
-    info.className = 'track-item-info';
-    const titleEl = document.createElement('div');
-    titleEl.className = 'track-item-title';
-    titleEl.textContent = tr.title;
-    const artistEl = document.createElement('div');
-    artistEl.className = 'track-item-artist';
-    artistEl.textContent = tr.artist;
-    info.appendChild(titleEl);
-    info.appendChild(artistEl);
-
-    const dur = document.createElement('div');
-    dur.className = 'track-item-dur';
-    dur.textContent = tr.duration_text || formatTime(tr.duration_sec);
-
-    const actions = document.createElement('div');
-    actions.className = 'track-actions';
-
-    const rowUnlike = document.createElement('button');
-    rowUnlike.type = 'button';
-    rowUnlike.className = 'row-act-btn liked';
-    rowUnlike.title = 'Remove from Liked';
-    rowUnlike.textContent = '♥';
-    rowUnlike.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      await toggleTrackLike(tr);
+    return buildTrackRow({
+      tr,
+      displayIndex: idx,
+      active: isTrackCurrentlyPlaying(tr),
+      buttons: [
+        makeAddPlaylistRowButton(tr),
+        makeActionButton('row-act-btn liked', 'Remove from Liked', '♥', () => toggleTrackLike(tr)),
+      ],
+      onRowClick: () => playTrackFromCollection(tr),
     });
+  }
 
-    actions.appendChild(rowUnlike);
-
-    row.appendChild(idxEl);
-    row.appendChild(img);
-    row.appendChild(info);
-    row.appendChild(dur);
-    row.appendChild(actions);
-
-    row.addEventListener('click', async () => {
-      await playTrackFromLiked(tr);
+  function createCustomPlaylistRow(playlistName, tr, idx) {
+    return buildTrackRow({
+      tr,
+      displayIndex: idx,
+      active: isTrackCurrentlyPlaying(tr),
+      buttons: [
+        makeLikeRowButton(tr),
+        makeAddPlaylistRowButton(tr),
+        makeActionButton('row-act-btn danger', `Remove from "${playlistName}"`, '×', () => removeTrackFromSavedPlaylist(playlistName, tr)),
+      ],
+      onRowClick: () => playTrackFromCollection(tr),
     });
-    return row;
   }
 
   function renderSavedPlaylists() {
-    playlistEmpty.textContent = 'No saved playlists yet. Click "+ Save" to store your current queue.';
+    playlistEmpty.textContent = 'No playlists yet. Click "+ Playlist" to save your queue or create a playlist.';
     playlistEmpty.classList.toggle('hidden', state.savedPlaylists.length > 0);
     if (state.savedPlaylists.length === 0) return;
 
@@ -789,7 +861,9 @@
 
   function updateActiveRowHighlight() {
     if (state.activeTab !== 'queue') {
-      if (state.activeTab === 'liked') renderActiveDrawerView(false);
+      if (state.activeTab === 'liked' || state.activeTab.startsWith(CUSTOM_TAB_PREFIX)) {
+        renderActiveDrawerView(false);
+      }
       return;
     }
     const children = playlistList.children;
@@ -820,7 +894,118 @@
       state.likedTracks = Array.isArray(updated) ? updated : [];
       updateLikeButtonUI();
       renderActiveDrawerView(false);
+      if (state.popoverTrack && state.popoverTrack.id === tr.id && !addPlaylistPopover.classList.contains('hidden')) {
+        renderAddToPlaylistList(state.popoverTrack);
+      }
     } catch (_) {}
+  }
+
+  async function removeTrackFromSavedPlaylist(playlistName, tr) {
+    if (!playlistName || !tr || !tr.id) return;
+    try {
+      const updated = await window.backendRemoveTrackFromPlaylist(playlistName, tr.id);
+      state.savedPlaylists = Array.isArray(updated) ? updated : [];
+      renderActiveDrawerView(false);
+      showToast(`Removed from "${playlistName}"`);
+    } catch (_) {
+      showToast('Failed to remove track');
+    }
+  }
+
+  function closeAddToPlaylistPopover() {
+    state.popoverTrack = null;
+    if (addPlaylistPopover) {
+      addPlaylistPopover.classList.add('hidden');
+    }
+  }
+
+  function renderAddToPlaylistList(tr) {
+    if (!addPlaylistList) return;
+    addPlaylistList.innerHTML = '';
+    const frag = document.createDocumentFragment();
+
+    const makeOption = (label, countText, inPlaylist, onToggle) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'add-playlist-item' + (inPlaylist ? ' in-playlist' : '');
+      const check = document.createElement('span');
+      check.className = 'add-playlist-check';
+      check.textContent = inPlaylist ? '✓' : '';
+      const nameEl = document.createElement('span');
+      nameEl.className = 'add-playlist-item-name';
+      nameEl.textContent = label;
+      const countEl = document.createElement('span');
+      countEl.className = 'add-playlist-item-count';
+      countEl.textContent = countText;
+      item.appendChild(check);
+      item.appendChild(nameEl);
+      item.appendChild(countEl);
+      item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        onToggle();
+      });
+      return item;
+    };
+
+    frag.appendChild(makeOption(
+      'Liked ♥',
+      String(state.likedTracks.length),
+      isTrackLiked(tr.id),
+      () => toggleTrackLike(tr)
+    ));
+
+    state.savedPlaylists.forEach((sp) => {
+      const count = Array.isArray(sp.tracks) ? sp.tracks.length : 0;
+      const inPl = playlistContainsTrack(sp, tr.id);
+      frag.appendChild(makeOption(
+        sp.name,
+        String(count),
+        inPl,
+        async () => {
+          try {
+            const updated = inPl
+              ? await window.backendRemoveTrackFromPlaylist(sp.name, tr.id)
+              : await window.backendAddTrackToPlaylist(sp.name, tr);
+            state.savedPlaylists = Array.isArray(updated) ? updated : [];
+            renderAddToPlaylistList(tr);
+            renderActiveDrawerView(false);
+            showToast(inPl ? `Removed from "${sp.name}"` : `Added to "${sp.name}"`);
+          } catch (_) {
+            showToast('Failed to update playlist');
+          }
+        }
+      ));
+    });
+
+    addPlaylistList.appendChild(frag);
+  }
+
+  function openAddToPlaylistPopover(tr, anchorEl) {
+    if (!tr || !tr.id || !addPlaylistPopover) return;
+    const sameTrackOpen = !addPlaylistPopover.classList.contains('hidden') &&
+      state.popoverTrack && state.popoverTrack.id === tr.id;
+    if (sameTrackOpen) {
+      closeAddToPlaylistPopover();
+      return;
+    }
+
+    state.popoverTrack = tr;
+    addPlaylistTrack.textContent = tr.title || 'Selected track';
+    addPlaylistInput.value = '';
+    renderAddToPlaylistList(tr);
+
+    addPlaylistPopover.style.visibility = 'hidden';
+    addPlaylistPopover.classList.remove('hidden');
+
+    const popRect = addPlaylistPopover.getBoundingClientRect();
+    const btnRect = anchorEl.getBoundingClientRect();
+    let top = btnRect.bottom + 6;
+    if (top + popRect.height > window.innerHeight - 10) {
+      top = btnRect.top - popRect.height - 6;
+    }
+    top = Math.max(10, Math.min(window.innerHeight - popRect.height - 10, top));
+    addPlaylistPopover.style.top = `${Math.round(top)}px`;
+    addPlaylistPopover.style.visibility = 'visible';
   }
 
   async function moveTrackPlayNext(idx) {
@@ -869,7 +1054,7 @@
     await window.backendUpdatePlaylist(state.playlist, state.currentIndex).catch(() => {});
   }
 
-  async function playTrackFromLiked(tr) {
+  async function playTrackFromCollection(tr) {
     let idx = state.playlist.findIndex((item) => item.id === tr.id);
     if (idx < 0) {
       const insertAt = state.currentIndex >= 0 ? state.currentIndex + 1 : 0;
@@ -1168,15 +1353,27 @@
   document.addEventListener('pointerdown', unlockAudioContextOnGesture);
   document.addEventListener('keydown', unlockAudioContextOnGesture);
 
+  if (drawerTabsScroll) {
+    drawerTabsScroll.addEventListener('wheel', (e) => {
+      if (Math.abs(e.deltaY) > Math.abs(e.deltaX)) {
+        e.preventDefault();
+        drawerTabsScroll.scrollLeft += e.deltaY;
+      }
+    }, { passive: false });
+  }
+
   tabQueue.addEventListener('click', () => {
+    closeAddToPlaylistPopover();
     state.activeTab = 'queue';
     renderActiveDrawerView(true);
   });
   tabLiked.addEventListener('click', () => {
+    closeAddToPlaylistPopover();
     state.activeTab = 'liked';
     renderActiveDrawerView(false);
   });
   tabSaved.addEventListener('click', () => {
+    closeAddToPlaylistPopover();
     state.activeTab = 'saved';
     renderActiveDrawerView(false);
   });
@@ -1187,6 +1384,28 @@
   });
 
   playLikedBtn.addEventListener('click', async () => {
+    closeAddToPlaylistPopover();
+    const customName = getSelectedSavedPlaylistName();
+    if (customName) {
+      const sp = findSavedPlaylist(customName);
+      if (!sp || !Array.isArray(sp.tracks) || sp.tracks.length === 0) return;
+      try {
+        const res = await window.backendLoadSavedPlaylist(sp.name);
+        if (!res || !Array.isArray(res.playlist) || res.playlist.length === 0) return;
+        state.playlist = res.playlist;
+        state.shuffleHistory = [];
+        state.currentIndex = 0;
+        state.activeTab = 'queue';
+        searchInput.value = sp.query || '';
+        renderActiveDrawerView(true);
+        showToast(`Playing "${sp.name}"`);
+        await playTrackAt(0, true, 0);
+      } catch (_) {
+        showToast('Failed to play playlist');
+      }
+      return;
+    }
+
     if (state.likedTracks.length === 0) return;
     state.playlist = state.likedTracks.map((t) => ({ ...t }));
     state.shuffleHistory = [];
@@ -1200,7 +1419,11 @@
   saveQueueBtn.addEventListener('click', () => {
     saveQueueBar.classList.toggle('hidden');
     if (!saveQueueBar.classList.contains('hidden')) {
-      saveQueueInput.value = searchInput.value.trim() || `Playlist ${state.savedPlaylists.length + 1}`;
+      if (saveQueueConfirm) {
+        saveQueueConfirm.classList.toggle('hidden', state.playlist.length === 0);
+      }
+      const fallback = `Playlist ${state.savedPlaylists.length + 1}`;
+      saveQueueInput.value = state.playlist.length > 0 ? (searchInput.value.trim() || fallback) : fallback;
       saveQueueInput.focus();
       saveQueueInput.select();
     }
@@ -1212,7 +1435,7 @@
 
   async function confirmSaveQueue() {
     const name = saveQueueInput.value.trim();
-    if (!name) return;
+    if (!name || state.playlist.length === 0) return;
     try {
       const updated = await window.backendSavePlaylist(name);
       state.savedPlaylists = Array.isArray(updated) ? updated : [];
@@ -1224,14 +1447,73 @@
     }
   }
 
+  async function confirmCreateEmptyPlaylist() {
+    const name = saveQueueInput.value.trim();
+    if (!name) {
+      saveQueueInput.focus();
+      return;
+    }
+    try {
+      const updated = await window.backendCreatePlaylist(name, []);
+      state.savedPlaylists = Array.isArray(updated) ? updated : [];
+      saveQueueBar.classList.add('hidden');
+      state.activeTab = CUSTOM_TAB_PREFIX + name;
+      renderActiveDrawerView(false);
+      const activePill = customPlaylistTabs && customPlaylistTabs.querySelector('.tab-pill.active');
+      if (activePill) {
+        activePill.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      }
+      showToast(`Created playlist "${name}"`);
+    } catch (_) {
+      showToast('Failed to create playlist');
+    }
+  }
+
   saveQueueConfirm.addEventListener('click', confirmSaveQueue);
+  if (saveEmptyConfirm) {
+    saveEmptyConfirm.addEventListener('click', confirmCreateEmptyPlaylist);
+  }
   saveQueueInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') {
       e.preventDefault();
-      confirmSaveQueue();
+      if (state.playlist.length > 0) {
+        confirmSaveQueue();
+      } else {
+        confirmCreateEmptyPlaylist();
+      }
     } else if (e.key === 'Escape') {
       saveQueueBar.classList.add('hidden');
     }
+  });
+
+  if (addPlaylistClose) {
+    addPlaylistClose.addEventListener('click', closeAddToPlaylistPopover);
+  }
+
+  if (addPlaylistForm) {
+    addPlaylistForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const tr = state.popoverTrack;
+      const name = addPlaylistInput.value.trim();
+      if (!tr || !tr.id || !name) return;
+      try {
+        const updated = await window.backendCreatePlaylist(name, [tr]);
+        state.savedPlaylists = Array.isArray(updated) ? updated : [];
+        addPlaylistInput.value = '';
+        renderActiveDrawerView(false);
+        closeAddToPlaylistPopover();
+        showToast(`Created "${name}" & added song`);
+      } catch (_) {
+        showToast('Failed to create playlist');
+      }
+    });
+  }
+
+  document.addEventListener('click', (e) => {
+    if (!addPlaylistPopover || addPlaylistPopover.classList.contains('hidden')) return;
+    if (addPlaylistPopover.contains(e.target)) return;
+    if (e.target && typeof e.target.closest === 'function' && e.target.closest('.add-pl-btn')) return;
+    closeAddToPlaylistPopover();
   });
 
   authBtn.addEventListener('click', async () => {
@@ -1389,6 +1671,9 @@
 
   // In-window keyboard shortcuts
   document.addEventListener('keydown', async (e) => {
+    if (e.key === 'Escape' && addPlaylistPopover && !addPlaylistPopover.classList.contains('hidden')) {
+      closeAddToPlaylistPopover();
+    }
     const tag = (document.activeElement && document.activeElement.tagName) || '';
     const isInput = tag === 'INPUT' || tag === 'TEXTAREA';
     if (isInput) {

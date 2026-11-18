@@ -169,3 +169,54 @@ func TestAuthStateAndNetscapeCookies(t *testing.T) {
 		t.Fatalf("unexpected cookies.txt content:\n%s", text)
 	}
 }
+
+func TestSavedPlaylistCreateAddAndRemoveTrack(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	s := DefaultAppState()
+	if err := s.CreatePlaylist("Workout", nil); err != nil {
+		t.Fatalf("CreatePlaylist empty failed: %v", err)
+	}
+	if len(s.SavedPlaylists) != 1 || s.SavedPlaylists[0].Name != "Workout" || len(s.SavedPlaylists[0].Tracks) != 0 {
+		t.Fatalf("unexpected created playlist: %+v", s.SavedPlaylists)
+	}
+
+	t1 := Track{ID: "t1", Title: "Song 1", Artist: "Artist 1", DurationSec: 180}
+	t2 := Track{ID: "t2", Title: "Song 2", Artist: "Artist 2", DurationSec: 200}
+
+	added, err := s.AddTrackToPlaylist("workout", t1)
+	if err != nil || !added {
+		t.Fatalf("expected t1 added to Workout, got added=%v err=%v", added, err)
+	}
+	// Duplicate ID should be idempotent.
+	addedDup, err := s.AddTrackToPlaylist("Workout", t1)
+	if err != nil || addedDup {
+		t.Fatalf("expected duplicate t1 skipped, got added=%v err=%v", addedDup, err)
+	}
+	added2, err := s.AddTrackToPlaylist("Workout", t2)
+	if err != nil || !added2 {
+		t.Fatalf("expected t2 added to Workout, got added=%v err=%v", added2, err)
+	}
+	if len(s.SavedPlaylists[0].Tracks) != 2 {
+		t.Fatalf("expected 2 tracks in Workout, got %d", len(s.SavedPlaylists[0].Tracks))
+	}
+
+	if err := s.RemoveTrackFromPlaylist("Workout", "t1"); err != nil {
+		t.Fatalf("RemoveTrackFromPlaylist failed: %v", err)
+	}
+	if len(s.SavedPlaylists[0].Tracks) != 1 || s.SavedPlaylists[0].Tracks[0].ID != "t2" {
+		t.Fatalf("unexpected tracks after removal: %+v", s.SavedPlaylists[0].Tracks)
+	}
+
+	if err := SaveAppStateTo(path, s); err != nil {
+		t.Fatalf("SaveAppStateTo failed: %v", err)
+	}
+	loaded, err := LoadAppStateFrom(path)
+	if err != nil {
+		t.Fatalf("LoadAppStateFrom failed: %v", err)
+	}
+	if len(loaded.SavedPlaylists) != 1 || len(loaded.SavedPlaylists[0].Tracks) != 1 || loaded.SavedPlaylists[0].Tracks[0].ID != "t2" {
+		t.Fatalf("persisted playlist mismatch: %+v", loaded.SavedPlaylists)
+	}
+}

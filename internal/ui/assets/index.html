@@ -164,14 +164,18 @@
     <section id="playlist-drawer" class="playlist-drawer">
       <div class="drawer-toolbar">
         <div class="drawer-tabs">
-          <button id="tab-queue" type="button" class="tab-pill active">Queue</button>
-          <button id="tab-liked" type="button" class="tab-pill">Liked ♥</button>
-          <button id="tab-saved" type="button" class="tab-pill">Saved</button>
-          <button id="save-queue-btn" type="button" class="tab-pill save-btn" title="Save current playlist">+ Save</button>
+          <div id="drawer-tabs-scroll" class="drawer-tabs-scroll">
+            <button id="tab-queue" type="button" class="tab-pill active">Queue</button>
+            <button id="tab-liked" type="button" class="tab-pill">Liked ♥</button>
+            <div id="custom-playlist-tabs" class="custom-playlist-tabs"></div>
+            <button id="tab-saved" type="button" class="tab-pill">Saved</button>
+          </div>
+          <button id="save-queue-btn" type="button" class="tab-pill save-btn" title="Save queue or create playlist">+ Playlist</button>
         </div>
         <div id="save-queue-bar" class="save-queue-bar hidden">
           <input id="save-queue-input" type="text" placeholder="Playlist name..." autocomplete="off" spellcheck="false" />
-          <button id="save-queue-confirm" type="button" class="pill-btn accent">Save</button>
+          <button id="save-queue-confirm" type="button" class="pill-btn accent" title="Save all songs in current queue">Save Queue</button>
+          <button id="save-empty-confirm" type="button" class="pill-btn" title="Create a new empty playlist">New Empty</button>
           <button id="save-queue-cancel" type="button" class="pill-btn">Cancel</button>
         </div>
         <div id="filter-row" class="filter-row">
@@ -191,6 +195,20 @@
         </div>
       </div>
     </section>
+
+    <!-- Add Track to Playlist Popover -->
+    <div id="add-playlist-popover" class="add-playlist-popover hidden">
+      <div class="add-playlist-header">
+        <span class="add-playlist-label">Add to playlist</span>
+        <button id="add-playlist-close" type="button" class="row-act-btn" title="Close">×</button>
+      </div>
+      <div id="add-playlist-track" class="add-playlist-track"></div>
+      <div id="add-playlist-list" class="add-playlist-list"></div>
+      <form id="add-playlist-form" class="add-playlist-form">
+        <input id="add-playlist-input" type="text" placeholder="New playlist..." autocomplete="off" spellcheck="false" />
+        <button type="submit" class="pill-btn accent">+ Add</button>
+      </form>
+    </div>
 
     <div id="status-toast" class="status-toast hidden"></div>
   </div>

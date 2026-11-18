@@ -727,7 +727,45 @@ html, body {
 .drawer-tabs {
   display: flex;
   align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.drawer-tabs-scroll {
+  flex: 1 1 0;
+  min-width: 0;
+  display: flex;
+  align-items: center;
   gap: 5px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  padding-bottom: 2px;
+  scroll-behavior: smooth;
+}
+
+.drawer-tabs-scroll::-webkit-scrollbar {
+  height: 3px;
+}
+
+.drawer-tabs-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.drawer-tabs-scroll::-webkit-scrollbar-thumb {
+  background: var(--yt-scroll-thumb);
+  border-radius: 999px;
+}
+
+.drawer-tabs-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--yt-scroll-thumb-hover);
+}
+
+.custom-playlist-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
 }
 
 .tab-pill {
@@ -741,6 +779,11 @@ html, body {
   font-size: 11.5px;
   font-weight: 500;
   cursor: pointer;
+  flex-shrink: 0;
+  white-space: nowrap;
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   transition: background 0.12s ease, color 0.12s ease;
 }
 
@@ -754,7 +797,8 @@ html, body {
 }
 
 .tab-pill.save-btn {
-  margin-left: auto;
+  margin-left: 0;
+  flex-shrink: 0;
   border-radius: 16px;
 }
 
@@ -1021,6 +1065,148 @@ html, body {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+.add-playlist-popover {
+  position: fixed;
+  right: 10px;
+  z-index: 35;
+  width: 245px;
+  max-width: calc(100vw - 20px);
+  padding: 10px;
+  border-radius: 12px;
+  background: var(--yt-popover-bg);
+  border: 1px solid var(--yt-border);
+  box-shadow: var(--yt-popover-shadow);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.add-playlist-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.add-playlist-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--yt-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+
+.add-playlist-track {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--yt-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--yt-border);
+}
+
+.add-playlist-list {
+  max-height: 150px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.add-playlist-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.add-playlist-list::-webkit-scrollbar-thumb {
+  background: var(--yt-scroll-thumb);
+  border-radius: 999px;
+}
+
+.add-playlist-item {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--yt-text-primary);
+  font-family: inherit;
+  font-size: 11.5px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s ease;
+}
+
+.add-playlist-item:hover {
+  background: var(--yt-bg-row-hover);
+}
+
+.add-playlist-check {
+  width: 15px;
+  height: 15px;
+  border-radius: 4px;
+  border: 1px solid var(--yt-border);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  flex-shrink: 0;
+  color: transparent;
+}
+
+.add-playlist-item.in-playlist .add-playlist-check {
+  background: var(--yt-red);
+  border-color: var(--yt-red);
+  color: #ffffff;
+}
+
+.add-playlist-item-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.add-playlist-item-count {
+  font-size: 10.5px;
+  color: var(--yt-text-secondary);
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.add-playlist-form {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding-top: 6px;
+  border-top: 1px solid var(--yt-border);
+}
+
+.add-playlist-form input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 9px;
+  border-radius: 14px;
+  border: 1px solid var(--yt-search-border);
+  background: var(--yt-search-bg);
+  color: var(--yt-text-primary);
+  font-family: inherit;
+  font-size: 11.5px;
+  outline: none;
+  user-select: text;
+}
+
+.add-playlist-form input:focus {
+  border-color: var(--yt-search-focus);
 }
 
 .status-toast {

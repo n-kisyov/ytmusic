@@ -699,6 +699,54 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		return err
 	}
 
+	if err := w.Bind("backendCreatePlaylist", func(name string, tracks []config.Track) ([]config.SavedPlaylist, error) {
+		a.mu.Lock()
+		if err := a.state.CreatePlaylist(name, tracks); err != nil {
+			a.mu.Unlock()
+			return nil, err
+		}
+		snapshot := a.cloneStateLocked()
+		out := append([]config.SavedPlaylist(nil), snapshot.SavedPlaylists...)
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return out, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendAddTrackToPlaylist", func(name string, track config.Track) ([]config.SavedPlaylist, error) {
+		a.mu.Lock()
+		if _, err := a.state.AddTrackToPlaylist(name, track); err != nil {
+			a.mu.Unlock()
+			return nil, err
+		}
+		snapshot := a.cloneStateLocked()
+		out := append([]config.SavedPlaylist(nil), snapshot.SavedPlaylists...)
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return out, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendRemoveTrackFromPlaylist", func(name string, trackID string) ([]config.SavedPlaylist, error) {
+		a.mu.Lock()
+		if err := a.state.RemoveTrackFromPlaylist(name, trackID); err != nil {
+			a.mu.Unlock()
+			return nil, err
+		}
+		snapshot := a.cloneStateLocked()
+		out := append([]config.SavedPlaylist(nil), snapshot.SavedPlaylists...)
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return out, nil
+	}); err != nil {
+		return err
+	}
+
 	if err := w.Bind("backendUpdatePlaybackState", func(index int, positionSec float64, isPlaying bool, volume float64, muted bool) error {
 		a.mu.Lock()
 		if index >= -1 && index < len(a.state.Playlist) {
