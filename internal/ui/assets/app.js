@@ -1285,9 +1285,11 @@
     } finally {
       requestAnimationFrame(() => {
         requestAnimationFrame(() => {
-          if (typeof window.backendShowWindow === 'function') {
-            window.backendShowWindow().catch(() => {});
-          }
+          setTimeout(() => {
+            if (typeof window.backendShowWindow === 'function') {
+              window.backendShowWindow().catch(() => {});
+            }
+          }, 50);
         });
       });
     }
