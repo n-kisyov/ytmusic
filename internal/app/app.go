@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,16 +47,18 @@ type loadMorePayload struct {
 
 // App coordinates the UI WebView2 window, Win32 shell/tray, YouTube client, and stream proxy.
 type App struct {
-	mu          sync.Mutex
-	state       config.AppState
-	authState   config.AuthState
-	ytClient    *youtube.Client
-	resolver    *player.Resolver
-	server      *player.Server
-	wv          webview2.WebView
-	winCtrl     *win32.Controller
-	authRunning bool
-	exited      bool
+	mu           sync.Mutex
+	state        config.AppState
+	authState    config.AuthState
+	ytClient     *youtube.Client
+	resolver     *player.Resolver
+	server       *player.Server
+	wv           webview2.WebView
+	winCtrl      *win32.Controller
+	authRunning  bool
+	exited       bool
+	sleepMinutes int
+	sleepTimer   *time.Timer
 }
 
 // New initializes application state, YouTube client, stream resolver, and local UI/stream server.
@@ -71,6 +74,7 @@ func New() (*App, error) {
 
 	ytClient := youtube.NewClient(nil)
 	ytClient.SetAuth(authState)
+	ytClient.SetOverflow(state.Overflow)
 
 	resolver := player.NewResolver(nil)
 	resolver.SetAuth(authState)
@@ -185,6 +189,53 @@ func (a *App) Run(debug bool) error {
 			defer a.mu.Unlock()
 			return a.state.AlwaysOnTop
 		},
+		OnToggleShuffle: func() {
+			a.mu.Lock()
+			a.state.Shuffle = !a.state.Shuffle
+			snapshot := a.cloneStateLocked()
+			a.mu.Unlock()
+
+			_ = config.SaveAppState(snapshot)
+			w.Dispatch(func() {
+				w.Eval("window.__trayCommand && window.__trayCommand('toggle_shuffle')")
+			})
+		},
+		IsShuffleEnabled: func() bool {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			return a.state.Shuffle
+		},
+		OnCycleRepeat: func() {
+			a.mu.Lock()
+			switch a.state.RepeatMode {
+			case "off":
+				a.state.RepeatMode = "all"
+			case "all":
+				a.state.RepeatMode = "one"
+			default:
+				a.state.RepeatMode = "off"
+			}
+			snapshot := a.cloneStateLocked()
+			a.mu.Unlock()
+
+			_ = config.SaveAppState(snapshot)
+			w.Dispatch(func() {
+				w.Eval("window.__trayCommand && window.__trayCommand('cycle_repeat')")
+			})
+		},
+		GetRepeatMode: func() string {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			return a.state.RepeatMode
+		},
+		OnSetSleepTimer: func(minutes int) {
+			a.setSleepTimer(minutes)
+		},
+		GetSleepTimerMinutes: func() int {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			return a.sleepMinutes
+		},
 		OnExit: func() {
 			a.quit()
 		},
@@ -267,6 +318,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		a.mu.Lock()
 		a.state.SearchQuery = query
 		a.state.Playlist = append([]config.Track(nil), res.Tracks...)
+		a.state.Overflow = a.ytClient.GetOverflow()
 		a.state.ContinuationToken = res.ContinuationToken
 		a.state.PositionSec = 0
 		if len(a.state.Playlist) > 0 {
@@ -329,6 +381,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			}
 		}
 		a.state.Playlist = append(a.state.Playlist, added...)
+		a.state.Overflow = a.ytClient.GetOverflow()
 		a.state.ContinuationToken = res.ContinuationToken
 		snapshot := a.cloneStateLocked()
 		a.mu.Unlock()
@@ -411,6 +464,169 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			})
 		}
 		return nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendSetModes", func(shuffle bool, repeatMode string) error {
+		switch repeatMode {
+		case "off", "all", "one":
+		default:
+			repeatMode = "off"
+		}
+		a.mu.Lock()
+		a.state.Shuffle = shuffle
+		a.state.RepeatMode = repeatMode
+		snapshot := a.cloneStateLocked()
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendUpdatePlaylist", func(playlist []config.Track, currentIndex int) error {
+		a.mu.Lock()
+		a.state.Playlist = append([]config.Track(nil), playlist...)
+		if currentIndex >= 0 && currentIndex < len(a.state.Playlist) {
+			a.state.CurrentIndex = currentIndex
+			a.state.CurrentTrackID = a.state.Playlist[currentIndex].ID
+		} else {
+			a.state.CurrentIndex = -1
+			a.state.CurrentTrackID = ""
+		}
+		a.updateTrayTitleLocked()
+		snapshot := a.cloneStateLocked()
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendToggleLike", func(track config.Track) ([]config.Track, error) {
+		if track.ID == "" {
+			a.mu.Lock()
+			liked := append([]config.Track(nil), a.state.LikedTracks...)
+			a.mu.Unlock()
+			return liked, nil
+		}
+		a.mu.Lock()
+		idx := -1
+		for i, t := range a.state.LikedTracks {
+			if t.ID == track.ID {
+				idx = i
+				break
+			}
+		}
+		if idx >= 0 {
+			a.state.LikedTracks = append(a.state.LikedTracks[:idx], a.state.LikedTracks[idx+1:]...)
+		} else {
+			a.state.LikedTracks = append([]config.Track{track}, a.state.LikedTracks...)
+		}
+		liked := append([]config.Track(nil), a.state.LikedTracks...)
+		snapshot := a.cloneStateLocked()
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return liked, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendSavePlaylist", func(name string) ([]config.SavedPlaylist, error) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return nil, fmt.Errorf("playlist name cannot be empty")
+		}
+		a.mu.Lock()
+		if len(a.state.Playlist) == 0 {
+			a.mu.Unlock()
+			return nil, fmt.Errorf("current queue is empty")
+		}
+		sp := config.SavedPlaylist{
+			Name:      name,
+			Query:     a.state.SearchQuery,
+			Tracks:    append([]config.Track(nil), a.state.Playlist...),
+			CreatedAt: time.Now().Unix(),
+		}
+		replaced := false
+		for i, existing := range a.state.SavedPlaylists {
+			if strings.EqualFold(existing.Name, name) {
+				a.state.SavedPlaylists[i] = sp
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			a.state.SavedPlaylists = append([]config.SavedPlaylist{sp}, a.state.SavedPlaylists...)
+		}
+		out := append([]config.SavedPlaylist(nil), a.state.SavedPlaylists...)
+		snapshot := a.cloneStateLocked()
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return out, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendLoadSavedPlaylist", func(name string) (searchPayload, error) {
+		a.mu.Lock()
+		var found *config.SavedPlaylist
+		for i := range a.state.SavedPlaylists {
+			if strings.EqualFold(a.state.SavedPlaylists[i].Name, name) {
+				found = &a.state.SavedPlaylists[i]
+				break
+			}
+		}
+		if found == nil {
+			a.mu.Unlock()
+			return searchPayload{}, fmt.Errorf("saved playlist %q not found", name)
+		}
+		a.ytClient.ClearOverflow()
+		a.state.Overflow = nil
+		a.state.SearchQuery = found.Query
+		a.state.ContinuationToken = ""
+		a.state.Playlist = append([]config.Track(nil), found.Tracks...)
+		a.state.PositionSec = 0
+		if len(a.state.Playlist) > 0 {
+			a.state.CurrentIndex = 0
+			a.state.CurrentTrackID = a.state.Playlist[0].ID
+			a.state.WasPlaying = true
+		} else {
+			a.state.CurrentIndex = -1
+			a.state.CurrentTrackID = ""
+			a.state.WasPlaying = false
+		}
+		a.updateTrayTitleLocked()
+		tracks := append([]config.Track(nil), a.state.Playlist...)
+		snapshot := a.cloneStateLocked()
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return searchPayload{Playlist: tracks}, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendDeleteSavedPlaylist", func(name string) ([]config.SavedPlaylist, error) {
+		a.mu.Lock()
+		filtered := make([]config.SavedPlaylist, 0, len(a.state.SavedPlaylists))
+		for _, sp := range a.state.SavedPlaylists {
+			if !strings.EqualFold(sp.Name, name) {
+				filtered = append(filtered, sp)
+			}
+		}
+		a.state.SavedPlaylists = filtered
+		out := append([]config.SavedPlaylist(nil), a.state.SavedPlaylists...)
+		snapshot := a.cloneStateLocked()
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return out, nil
 	}); err != nil {
 		return err
 	}
@@ -503,7 +719,57 @@ func (a *App) bindMethods(w webview2.WebView) error {
 	return nil
 }
 
+func (a *App) setSleepTimer(minutes int) {
+	a.mu.Lock()
+	if a.sleepTimer != nil {
+		a.sleepTimer.Stop()
+		a.sleepTimer = nil
+	}
+	a.sleepMinutes = minutes
+	wv := a.wv
+	if minutes > 0 {
+		duration := time.Duration(minutes) * time.Minute
+		var timer *time.Timer
+		timer = time.AfterFunc(duration, func() {
+			a.mu.Lock()
+			if a.sleepTimer != timer {
+				a.mu.Unlock()
+				return
+			}
+			a.sleepMinutes = 0
+			a.sleepTimer = nil
+			w := a.wv
+			a.mu.Unlock()
+			if w != nil {
+				w.Dispatch(func() {
+					w.Eval("window.__trayCommand && window.__trayCommand('pause_sleep')")
+				})
+			}
+		})
+		a.sleepTimer = timer
+	}
+	a.mu.Unlock()
+
+	if wv != nil {
+		msg := "Sleep timer off"
+		if minutes > 0 {
+			msg = fmt.Sprintf("Sleep timer set for %dm", minutes)
+		}
+		rawMsg, _ := json.Marshal(msg)
+		wv.Dispatch(func() {
+			wv.Eval("window.__showToast && window.__showToast(" + string(rawMsg) + ")")
+		})
+	}
+}
+
 func (a *App) quit() {
+	a.mu.Lock()
+	if a.sleepTimer != nil {
+		a.sleepTimer.Stop()
+		a.sleepTimer = nil
+	}
+	a.mu.Unlock()
+
 	a.saveFinalState()
 	if a.winCtrl != nil {
 		a.winCtrl.BeginQuit()
@@ -544,6 +810,13 @@ func (a *App) updateTrayTitleLocked() {
 func (a *App) cloneStateLocked() config.AppState {
 	cp := a.state
 	cp.Playlist = append([]config.Track(nil), a.state.Playlist...)
+	cp.Overflow = append([]config.Track(nil), a.state.Overflow...)
+	cp.LikedTracks = append([]config.Track(nil), a.state.LikedTracks...)
+	cp.SavedPlaylists = make([]config.SavedPlaylist, len(a.state.SavedPlaylists))
+	for i, sp := range a.state.SavedPlaylists {
+		cp.SavedPlaylists[i] = sp
+		cp.SavedPlaylists[i].Tracks = append([]config.Track(nil), sp.Tracks...)
+	}
 	return cp
 }
 

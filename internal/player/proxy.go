@@ -98,13 +98,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 	var resp *http.Response
 	var err error
 	for attempt := 0; attempt < 2; attempt++ {
-		streamURL, resolveErr := s.resolver.Resolve(r.Context(), videoID)
+		resolved, resolveErr := s.resolver.ResolveStream(r.Context(), videoID)
 		if resolveErr != nil {
 			http.Error(w, "failed to resolve stream: "+resolveErr.Error(), http.StatusBadGateway)
 			return
 		}
 
-		req, reqErr := http.NewRequestWithContext(r.Context(), r.Method, streamURL, nil)
+		req, reqErr := http.NewRequestWithContext(r.Context(), r.Method, resolved.URL, nil)
 		if reqErr != nil {
 			http.Error(w, "invalid upstream URL", http.StatusInternalServerError)
 			return
@@ -112,7 +112,11 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		if rng := r.Header.Get("Range"); rng != "" {
 			req.Header.Set("Range", rng)
 		}
-		req.Header.Set("User-Agent", androidUserAgent)
+		ua := resolved.UserAgent
+		if ua == "" {
+			ua = androidUserAgent
+		}
+		req.Header.Set("User-Agent", ua)
 
 		resp, err = s.proxyHTTP.Do(req)
 		if err != nil {

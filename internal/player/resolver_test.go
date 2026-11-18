@@ -13,7 +13,9 @@ import (
 
 func TestProxyRangeForwardingAndUIStaticServing(t *testing.T) {
 	payload := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	var gotUA string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotUA = r.Header.Get("User-Agent")
 		w.Header().Set("Content-Type", "video/mp4")
 		w.Header().Set("Accept-Ranges", "bytes")
 		if r.Header.Get("Range") == "bytes=0-9" {
@@ -33,6 +35,7 @@ func TestProxyRangeForwardingAndUIStaticServing(t *testing.T) {
 	resolver.mu.Lock()
 	resolver.cache["testvid"] = cachedStream{
 		URL:       upstream.URL,
+		UserAgent: "custom-test-ua/1.0",
 		ExpiresAt: time.Now().Add(time.Hour),
 	}
 	resolver.mu.Unlock()
@@ -57,7 +60,7 @@ func TestProxyRangeForwardingAndUIStaticServing(t *testing.T) {
 		t.Fatalf("unexpected UI response: %q", string(uiBody))
 	}
 
-	// Verify Range request forwarding.
+	// Verify Range request forwarding and User-Agent preservation.
 	req, _ := http.NewRequest(http.MethodGet, srv.StreamURL("testvid"), nil)
 	req.Header.Set("Range", "bytes=0-9")
 	streamResp, err := http.DefaultClient.Do(req)
@@ -72,6 +75,9 @@ func TestProxyRangeForwardingAndUIStaticServing(t *testing.T) {
 	if string(chunk) != "0123456789" {
 		t.Fatalf("expected '0123456789', got %q", string(chunk))
 	}
+	if gotUA != "custom-test-ua/1.0" {
+		t.Fatalf("expected upstream User-Agent 'custom-test-ua/1.0', got %q", gotUA)
+	}
 }
 
 func TestLiveStreamResolve(t *testing.T) {
@@ -82,14 +88,14 @@ func TestLiveStreamResolve(t *testing.T) {
 	defer cancel()
 
 	resolver := NewResolver(nil)
-	url, err := resolver.Resolve(ctx, "2QzQUO3j0gE")
+	st, err := resolver.ResolveStream(ctx, "2QzQUO3j0gE")
 	if err != nil {
-		t.Fatalf("Resolve failed: %v", err)
+		t.Fatalf("ResolveStream failed: %v", err)
 	}
-	if !strings.HasPrefix(url, "http") {
-		t.Fatalf("expected http stream URL, got %q", url)
+	if !strings.HasPrefix(st.URL, "http") || st.UserAgent == "" {
+		t.Fatalf("expected http stream URL and non-empty UserAgent, got %+v", st)
 	}
-	t.Logf("resolved stream URL length=%d", len(url))
+	t.Logf("resolved stream URL length=%d ua=%q", len(st.URL), st.UserAgent)
 
 	srv, err := NewServer(resolver, nil)
 	if err != nil {

@@ -30,6 +30,9 @@ func TestAppStateSaveAndLoad(t *testing.T) {
 			{ID: "vid1", Title: "Track One", Artist: "Artist A", DurationSec: 185, DurationText: "3:05", Thumbnail: "https://i.ytimg.com/vi/vid1/hqdefault.jpg"},
 			{ID: "vid2", Title: "Track Two", Artist: "Artist B", DurationSec: 210, DurationText: "3:30", Thumbnail: "https://i.ytimg.com/vi/vid2/hqdefault.jpg"},
 		},
+		Overflow: []Track{
+			{ID: "vid3", Title: "Track Three", Artist: "Artist C", DurationSec: 195, DurationText: "3:15"},
+		},
 		CurrentIndex:     1,
 		CurrentTrackID:   "vid2",
 		PositionSec:      42.5,
@@ -37,10 +40,23 @@ func TestAppStateSaveAndLoad(t *testing.T) {
 		VideoEnabled:     true,
 		PlaylistExpanded: false,
 		AlwaysOnTop:      true,
-		Volume:           0.65,
-		Muted:            false,
-		WindowX:          300,
-		WindowY:          200,
+		Shuffle:          true,
+		RepeatMode:       "all",
+		LikedTracks: []Track{
+			{ID: "vid1", Title: "Track One", Artist: "Artist A", DurationSec: 185, DurationText: "3:05"},
+		},
+		SavedPlaylists: []SavedPlaylist{
+			{
+				Name:      "Chill Mix",
+				Query:     "lofi hip hop",
+				Tracks:    []Track{{ID: "vid1", Title: "Track One", Artist: "Artist A", DurationSec: 185}},
+				CreatedAt: 1700000000,
+			},
+		},
+		Volume:  0.65,
+		Muted:   false,
+		WindowX: 300,
+		WindowY: 200,
 	}
 
 	if err := SaveAppStateTo(path, state); err != nil {
@@ -55,6 +71,8 @@ func TestAppStateSaveAndLoad(t *testing.T) {
 	if loaded.SearchQuery != state.SearchQuery ||
 		loaded.ContinuationToken != state.ContinuationToken ||
 		len(loaded.Playlist) != 2 ||
+		len(loaded.Overflow) != 1 ||
+		loaded.Overflow[0].ID != "vid3" ||
 		loaded.CurrentIndex != 1 ||
 		loaded.CurrentTrackID != "vid2" ||
 		loaded.PositionSec != 42.5 ||
@@ -62,6 +80,11 @@ func TestAppStateSaveAndLoad(t *testing.T) {
 		!loaded.VideoEnabled ||
 		loaded.PlaylistExpanded ||
 		!loaded.AlwaysOnTop ||
+		!loaded.Shuffle ||
+		loaded.RepeatMode != "all" ||
+		len(loaded.LikedTracks) != 1 ||
+		len(loaded.SavedPlaylists) != 1 ||
+		loaded.SavedPlaylists[0].Name != "Chill Mix" ||
 		loaded.Volume != 0.65 ||
 		loaded.WindowX != 300 ||
 		loaded.WindowY != 200 {

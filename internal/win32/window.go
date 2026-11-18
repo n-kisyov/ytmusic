@@ -10,18 +10,29 @@ import (
 )
 
 const (
-	wmDestroy    = 0x0002
-	wmClose      = 0x0010
-	wmCommand    = 0x0111
-	wmSysCommand = 0x0112
-	wmTimer      = 0x0113
-	wmLButtonUp  = 0x0202
-	wmRButtonUp  = 0x0205
-	wmContextMenu = 0x007B
-	wmTrayIcon   = 0x800A // WM_APP + 10 (avoids go-webview2's WM_APP = 0x8000)
-	wmRestoreApp = 0x800B // WM_APP + 11 (posted by second instance to restore existing window)
+	wmDestroy         = 0x0002
+	wmClose           = 0x0010
+	wmQueryEndSession = 0x0011
+	wmEndSession      = 0x0016
+	wmCommand         = 0x0111
+	wmSysCommand      = 0x0112
+	wmTimer           = 0x0113
+	wmHotKey          = 0x0312
+	wmLButtonUp       = 0x0202
+	wmRButtonUp       = 0x0205
+	wmContextMenu     = 0x007B
+	wmTrayIcon        = 0x800A // WM_APP + 10 (avoids go-webview2's WM_APP = 0x8000)
+	wmRestoreApp      = 0x800B // WM_APP + 11 (posted by second instance to restore existing window)
 
 	scMinimize = 0xF020
+
+	vkMediaNextTrack = 0xB0
+	vkMediaPrevTrack = 0xB1
+	vkMediaPlayPause = 0xB3
+
+	hkPlayPause = 1
+	hkNext      = 2
+	hkPrev      = 3
 
 	gwlStyle   = ^uintptr(15) // -16
 	gwlExStyle = ^uintptr(19) // -20
@@ -52,15 +63,21 @@ type point struct {
 
 // Callbacks connects Win32 window/tray events back into the application layer.
 type Callbacks struct {
-	OnPlayPause         func()
-	OnNext              func()
-	OnPrev              func()
-	OnToggleVideo       func()
-	IsVideoEnabled      func() bool
-	OnToggleAlwaysOnTop func()
-	IsAlwaysOnTop       func() bool
-	OnExit              func()
-	OnResizeNeeded      func()
+	OnPlayPause          func()
+	OnNext               func()
+	OnPrev               func()
+	OnToggleVideo        func()
+	IsVideoEnabled       func() bool
+	OnToggleAlwaysOnTop  func()
+	IsAlwaysOnTop        func() bool
+	OnToggleShuffle      func()
+	IsShuffleEnabled     func() bool
+	OnCycleRepeat        func()
+	GetRepeatMode        func() string
+	OnSetSleepTimer      func(minutes int)
+	GetSleepTimerMinutes func() int
+	OnExit               func()
+	OnResizeNeeded       func()
 }
 
 // Controller manages the native Win32 window styles, DWM attributes, tray icon, and animations.
@@ -99,6 +116,8 @@ var (
 	procSystemParametersInfoW     = user32.NewProc("SystemParametersInfoW")
 	procGetSystemMetrics          = user32.NewProc("GetSystemMetrics")
 	procDestroyWindow             = user32.NewProc("DestroyWindow")
+	procRegisterHotKey            = user32.NewProc("RegisterHotKey")
+	procUnregisterHotKey          = user32.NewProc("UnregisterHotKey")
 
 	dwmapi                  = windows.NewLazySystemDLL("dwmapi.dll")
 	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
@@ -124,6 +143,7 @@ func NewController(hwnd unsafe.Pointer, cb Callbacks) *Controller {
 
 	c.applyWindowChrome()
 	c.initTray()
+	c.registerMediaHotKeys()
 
 	orig := setWindowLongPtr(h, gwlpWndProc, wndProcCB)
 	c.origWndProc = orig
@@ -184,7 +204,7 @@ func (c *Controller) SetWindowPosition(x, y int) {
 
 // GetWindowPosition returns the last known top-left screen coordinates of the window.
 func (c *Controller) GetWindowPosition() (int, int) {
-	if !c.hidden && c.trayAnim.mode == trayAnimNone {
+	if !c.hidden && c.trayAnim.mode == trayAnimNone && !c.resizeAnim.active {
 		var rc rect
 		procGetWindowRect.Call(c.hwnd, uintptr(unsafe.Pointer(&rc)))
 		if (rc.Right - rc.Left) > 80 {
@@ -213,10 +233,12 @@ func (c *Controller) SetClientSize(logicalW, logicalH int, animate bool) {
 	winW := r.Right - r.Left
 	winH := r.Bottom - r.Top
 
-	if c.hidden {
+	if c.hidden || c.trayAnim.mode != trayAnimNone {
 		c.savedRect.Right = c.savedRect.Left + winW
 		c.savedRect.Bottom = c.savedRect.Top + winH
-		procSetWindowPos.Call(c.hwnd, 0, 0, 0, uintptr(winW), uintptr(winH), swpNoMove|swpNoZOrder|swpNoActivate)
+		if c.hidden {
+			procSetWindowPos.Call(c.hwnd, 0, 0, 0, uintptr(winW), uintptr(winH), swpNoMove|swpNoZOrder|swpNoActivate)
+		}
 		return
 	}
 
@@ -260,8 +282,21 @@ func (c *Controller) BeginQuit() {
 	c.quitting = true
 	procKillTimer.Call(c.hwnd, timerResizeID)
 	procKillTimer.Call(c.hwnd, timerTrayAnimID)
+	c.unregisterMediaHotKeys()
 	c.removeTray()
 	procDestroyWindow.Call(c.hwnd)
+}
+
+func (c *Controller) registerMediaHotKeys() {
+	procRegisterHotKey.Call(c.hwnd, hkPlayPause, 0, vkMediaPlayPause)
+	procRegisterHotKey.Call(c.hwnd, hkNext, 0, vkMediaNextTrack)
+	procRegisterHotKey.Call(c.hwnd, hkPrev, 0, vkMediaPrevTrack)
+}
+
+func (c *Controller) unregisterMediaHotKeys() {
+	procUnregisterHotKey.Call(c.hwnd, hkPlayPause)
+	procUnregisterHotKey.Call(c.hwnd, hkNext)
+	procUnregisterHotKey.Call(c.hwnd, hkPrev)
 }
 
 func (c *Controller) getDPI() int {
@@ -290,9 +325,42 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		}
 		c.removeTray()
 
+	case wmQueryEndSession:
+		return 1
+
+	case wmEndSession:
+		if wParam != 0 {
+			c.quitting = true
+			if c.callbacks.OnExit != nil {
+				c.callbacks.OnExit()
+			} else {
+				c.BeginQuit()
+			}
+			return 0
+		}
+
 	case wmSysCommand:
 		if (wParam & 0xFFF0) == scMinimize {
 			c.MinimizeToTray()
+			return 0
+		}
+
+	case wmHotKey:
+		switch wParam {
+		case hkPlayPause:
+			if c.callbacks.OnPlayPause != nil {
+				c.callbacks.OnPlayPause()
+			}
+			return 0
+		case hkNext:
+			if c.callbacks.OnNext != nil {
+				c.callbacks.OnNext()
+			}
+			return 0
+		case hkPrev:
+			if c.callbacks.OnPrev != nil {
+				c.callbacks.OnPrev()
+			}
 			return 0
 		}
 
@@ -342,6 +410,36 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 				c.callbacks.OnToggleAlwaysOnTop()
 			}
 			return 0
+		case cmdToggleShuffle:
+			if c.callbacks.OnToggleShuffle != nil {
+				c.callbacks.OnToggleShuffle()
+			}
+			return 0
+		case cmdCycleRepeat:
+			if c.callbacks.OnCycleRepeat != nil {
+				c.callbacks.OnCycleRepeat()
+			}
+			return 0
+		case cmdSleepOff:
+			if c.callbacks.OnSetSleepTimer != nil {
+				c.callbacks.OnSetSleepTimer(0)
+			}
+			return 0
+		case cmdSleep15:
+			if c.callbacks.OnSetSleepTimer != nil {
+				c.callbacks.OnSetSleepTimer(15)
+			}
+			return 0
+		case cmdSleep30:
+			if c.callbacks.OnSetSleepTimer != nil {
+				c.callbacks.OnSetSleepTimer(30)
+			}
+			return 0
+		case cmdSleep60:
+			if c.callbacks.OnSetSleepTimer != nil {
+				c.callbacks.OnSetSleepTimer(60)
+			}
+			return 0
 		case cmdExit:
 			if c.callbacks.OnExit != nil {
 				c.callbacks.OnExit()
@@ -362,6 +460,7 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		}
 
 	case wmDestroy:
+		c.unregisterMediaHotKeys()
 		c.removeTray()
 		ctrlMu.Lock()
 		delete(controllers, hwnd)

@@ -67,6 +67,27 @@ func (c *Client) ClearOverflow() {
 	c.overflow = nil
 }
 
+// SetOverflow restores buffered overflow tracks (e.g. from persisted state).
+func (c *Client) SetOverflow(tracks []config.Track) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(tracks) == 0 {
+		c.overflow = nil
+		return
+	}
+	c.overflow = append([]config.Track(nil), tracks...)
+}
+
+// GetOverflow returns a copy of currently buffered overflow tracks.
+func (c *Client) GetOverflow() []config.Track {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.overflow) == 0 {
+		return nil
+	}
+	return append([]config.Track(nil), c.overflow...)
+}
+
 // SearchInitialPlaylist searches YouTube and collects targetCount playable tracks (default 30),
 // automatically following continuation tokens if a single search page returns fewer tracks.
 func (c *Client) SearchInitialPlaylist(ctx context.Context, query string, targetCount int) (SearchResult, error) {

@@ -20,19 +20,27 @@ import (
 )
 
 const (
-	streamCacheTTL   = 90 * time.Minute
-	androidUserAgent = "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip"
+	streamCacheTTL    = 90 * time.Minute
+	androidUserAgent  = "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip"
+	desktopChromeUA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+
+// ResolvedStream holds a resolved stream URL and the User-Agent required by upstream.
+type ResolvedStream struct {
+	URL       string
+	UserAgent string
+}
 
 type cachedStream struct {
 	URL       string
+	UserAgent string
 	ExpiresAt time.Time
 }
 
 type inflightResolve struct {
-	done chan struct{}
-	url  string
-	err  error
+	done   chan struct{}
+	stream ResolvedStream
+	err    error
 }
 
 // Resolver resolves playable progressive MP4 (audio+video) stream URLs for YouTube video IDs.
@@ -87,57 +95,64 @@ func (r *Resolver) Prefetch(videoID string) {
 
 // Resolve returns a direct CDN URL for the given YouTube video ID.
 func (r *Resolver) Resolve(ctx context.Context, videoID string) (string, error) {
+	st, err := r.ResolveStream(ctx, videoID)
+	return st.URL, err
+}
+
+// ResolveStream returns a direct CDN URL and associated User-Agent for the given YouTube video ID.
+func (r *Resolver) ResolveStream(ctx context.Context, videoID string) (ResolvedStream, error) {
 	videoID = strings.TrimSpace(videoID)
 	if videoID == "" {
-		return "", errors.New("video ID is empty")
+		return ResolvedStream{}, errors.New("video ID is empty")
 	}
 
 	r.mu.Lock()
 	if entry, ok := r.cache[videoID]; ok && time.Now().Before(entry.ExpiresAt) {
 		r.mu.Unlock()
-		return entry.URL, nil
+		return ResolvedStream{URL: entry.URL, UserAgent: entry.UserAgent}, nil
 	}
 	if call, ok := r.inflight[videoID]; ok {
 		r.mu.Unlock()
 		select {
 		case <-call.done:
-			return call.url, call.err
+			return call.stream, call.err
 		case <-ctx.Done():
-			return "", ctx.Err()
+			return ResolvedStream{}, ctx.Err()
 		}
 	}
 	call := &inflightResolve{done: make(chan struct{})}
 	r.inflight[videoID] = call
 	r.mu.Unlock()
 
-	url, err := r.resolveUncached(ctx, videoID)
+	st, err := r.resolveUncached(ctx, videoID)
 
 	r.mu.Lock()
-	if err == nil && url != "" {
+	if err == nil && st.URL != "" {
 		r.cache[videoID] = cachedStream{
-			URL:       url,
+			URL:       st.URL,
+			UserAgent: st.UserAgent,
 			ExpiresAt: time.Now().Add(streamCacheTTL),
 		}
 	}
 	delete(r.inflight, videoID)
-	call.url = url
+	call.stream = st
 	call.err = err
 	close(call.done)
 	r.mu.Unlock()
 
-	return url, err
+	return st, err
 }
 
-func (r *Resolver) resolveUncached(ctx context.Context, videoID string) (string, error) {
-	if url, err := r.resolveWithInnerTube(ctx, videoID); err == nil && url != "" {
-		return url, nil
+func (r *Resolver) resolveUncached(ctx context.Context, videoID string) (ResolvedStream, error) {
+	if st, err := r.resolveWithInnerTube(ctx, videoID); err == nil && st.URL != "" {
+		return st, nil
 	}
 	if bin := r.getYtDlpPath(); bin != "" {
-		if url, err := r.resolveWithYtDlp(ctx, bin, videoID); err == nil && url != "" {
-			return url, nil
+		if st, err := r.resolveWithYtDlp(ctx, bin, videoID); err == nil && st.URL != "" {
+			return st, nil
 		}
 	}
-	return "", fmt.Errorf("unable to resolve playable stream for %s", videoID)
+	return ResolvedStream{}, fmt.Errorf("unable to resolve playable stream for %s", videoID)
 }
 
 func (r *Resolver) getYtDlpPath() string {
@@ -170,7 +185,7 @@ func FindYtDlp() string {
 	return ""
 }
 
-func (r *Resolver) resolveWithYtDlp(ctx context.Context, bin, videoID string) (string, error) {
+func (r *Resolver) resolveWithYtDlp(ctx context.Context, bin, videoID string) (ResolvedStream, error) {
 	args := []string{
 		"-g",
 		"-f", "18/best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none]",
@@ -201,19 +216,23 @@ func (r *Resolver) resolveWithYtDlp(ctx context.Context, bin, videoID string) (s
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("yt-dlp failed: %w (%s)", err, strings.TrimSpace(stderr.String()))
+		return ResolvedStream{}, fmt.Errorf("yt-dlp failed: %w (%s)", err, strings.TrimSpace(stderr.String()))
 	}
 
 	for _, line := range strings.Split(stdout.String(), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
-			return line, nil
+			ua := desktopChromeUA
+			if strings.Contains(line, "c=ANDROID") {
+				ua = androidUserAgent
+			}
+			return ResolvedStream{URL: line, UserAgent: ua}, nil
 		}
 	}
-	return "", errors.New("yt-dlp returned no stream URL")
+	return ResolvedStream{}, errors.New("yt-dlp returned no stream URL")
 }
 
-func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (string, error) {
+func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (ResolvedStream, error) {
 	type clientDef struct {
 		ctx       map[string]any
 		userAgent string
@@ -324,7 +343,7 @@ func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (st
 
 		for _, u := range candidates {
 			if r.probeStreamURL(ctx, u, cl.userAgent) {
-				return u, nil
+				return ResolvedStream{URL: u, UserAgent: cl.userAgent}, nil
 			}
 		}
 		lastErr = errors.New("no playable format URL passed probe")
@@ -332,7 +351,7 @@ func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (st
 	if lastErr == nil {
 		lastErr = errors.New("failed to resolve stream URL")
 	}
-	return "", lastErr
+	return ResolvedStream{}, lastErr
 }
 
 func (r *Resolver) probeStreamURL(ctx context.Context, streamURL, ua string) bool {

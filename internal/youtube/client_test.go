@@ -147,25 +147,37 @@ func TestSearchInitialPlaylistCollects30AndLoadMoreAppends(t *testing.T) {
 		t.Fatalf("expected CONT_PAGE_3, got %q", res.ContinuationToken)
 	}
 
+	// Verify overflow tracks (31..35) can be persisted and restored across restarts.
+	savedOverflow := client.GetOverflow()
+	if len(savedOverflow) != 5 || savedOverflow[0].ID != "vid_31" {
+		t.Fatalf("expected 5 overflow tracks starting with vid_31, got %+v", savedOverflow)
+	}
+	restoredClient := NewClient(srv.Client())
+	restoredClient.SetBaseURL(srv.URL)
+	restoredClient.SetOverflow(savedOverflow)
+
 	existing := make(map[string]struct{}, len(res.Tracks))
 	for _, tr := range res.Tracks {
 		existing[tr.ID] = struct{}{}
 	}
 
-	// First LoadMore drains buffered overflow tracks (31..35) and tops up from CONT_PAGE_3 (36..50).
-	more1, err := client.FetchMoreSongs(context.Background(), res.ContinuationToken, "vid_30", existing)
+	// First LoadMore on restored client drains restored overflow tracks (31..35) and tops up from CONT_PAGE_3 (36..50).
+	more1, err := restoredClient.FetchMoreSongs(context.Background(), res.ContinuationToken, "vid_30", existing)
 	if err != nil {
 		t.Fatalf("FetchMoreSongs(1) failed: %v", err)
 	}
 	if len(more1.Tracks) != 20 {
 		t.Fatalf("expected 20 tracks (5 overflow + 15 page 3), got %d", len(more1.Tracks))
 	}
+	if len(restoredClient.GetOverflow()) != 0 {
+		t.Fatalf("expected overflow drained after FetchMoreSongs")
+	}
 	for _, tr := range more1.Tracks {
 		existing[tr.ID] = struct{}{}
 	}
 
 	// Second LoadMore fetches CONT_PAGE_4 (51..60).
-	more2, err := client.FetchMoreSongs(context.Background(), more1.ContinuationToken, "vid_50", existing)
+	more2, err := restoredClient.FetchMoreSongs(context.Background(), more1.ContinuationToken, "vid_50", existing)
 	if err != nil {
 		t.Fatalf("FetchMoreSongs(2) failed: %v", err)
 	}

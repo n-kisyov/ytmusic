@@ -3,6 +3,7 @@
 package win32
 
 import (
+	"fmt"
 	"math"
 	"syscall"
 	"unsafe"
@@ -21,6 +22,7 @@ const (
 
 	mfString    = 0x00000000
 	mfChecked   = 0x00000008
+	mfPopup     = 0x00000010
 	mfSeparator = 0x00000800
 
 	tpmLeftAlign   = 0x0000
@@ -36,6 +38,12 @@ const (
 	cmdToggleVideo       = 1005
 	cmdExit              = 1006
 	cmdToggleAlwaysOnTop = 1007
+	cmdToggleShuffle     = 1008
+	cmdCycleRepeat       = 1009
+	cmdSleepOff          = 1010
+	cmdSleep15           = 1011
+	cmdSleep30           = 1012
+	cmdSleep60           = 1013
 )
 
 type guid struct {
@@ -197,6 +205,31 @@ func (c *Controller) showTrayMenu() {
 	appendItem(mfString, cmdPlayPause, "Play / Pause")
 	appendItem(mfString, cmdNext, "Next Track")
 	appendItem(mfString, cmdPrev, "Previous Track")
+	appendItem(mfSeparator, 0, "")
+
+	shuffleFlags := uintptr(mfString)
+	if c.callbacks.IsShuffleEnabled != nil && c.callbacks.IsShuffleEnabled() {
+		shuffleFlags |= mfChecked
+	}
+	appendItem(shuffleFlags, cmdToggleShuffle, "Shuffle")
+
+	repeatMode := "off"
+	if c.callbacks.GetRepeatMode != nil {
+		repeatMode = c.callbacks.GetRepeatMode()
+	}
+	repeatLabel := "Repeat: Off"
+	repeatFlags := uintptr(mfString)
+	switch repeatMode {
+	case "all":
+		repeatLabel = "Repeat: All"
+		repeatFlags |= mfChecked
+	case "one":
+		repeatLabel = "Repeat: One"
+		repeatFlags |= mfChecked
+	}
+	appendItem(repeatFlags, cmdCycleRepeat, repeatLabel)
+
+	appendItem(mfSeparator, 0, "")
 
 	videoFlags := uintptr(mfString)
 	if c.callbacks.IsVideoEnabled != nil && c.callbacks.IsVideoEnabled() {
@@ -209,6 +242,33 @@ func (c *Controller) showTrayMenu() {
 		topFlags |= mfChecked
 	}
 	appendItem(topFlags, cmdToggleAlwaysOnTop, "Always on Top")
+
+	sleepMin := 0
+	if c.callbacks.GetSleepTimerMinutes != nil {
+		sleepMin = c.callbacks.GetSleepTimerMinutes()
+	}
+	hSleepMenu, _, _ := procCreatePopupMenu.Call()
+	if hSleepMenu != 0 {
+		appendSleep := func(mins int, id uintptr, label string) {
+			flags := uintptr(mfString)
+			if sleepMin == mins {
+				flags |= mfChecked
+			}
+			u, _ := windows.UTF16PtrFromString(label)
+			procAppendMenuW.Call(hSleepMenu, flags, id, uintptr(unsafe.Pointer(u)))
+		}
+		appendSleep(0, cmdSleepOff, "Off")
+		appendSleep(15, cmdSleep15, "15 minutes")
+		appendSleep(30, cmdSleep30, "30 minutes")
+		appendSleep(60, cmdSleep60, "60 minutes")
+
+		sleepLabel := "Sleep Timer"
+		if sleepMin > 0 {
+			sleepLabel = fmt.Sprintf("Sleep Timer (%dm)", sleepMin)
+		}
+		uSleep, _ := windows.UTF16PtrFromString(sleepLabel)
+		procAppendMenuW.Call(hMenu, mfPopup, hSleepMenu, uintptr(unsafe.Pointer(uSleep)))
+	}
 
 	appendItem(mfSeparator, 0, "")
 	appendItem(mfString, cmdExit, "Exit")

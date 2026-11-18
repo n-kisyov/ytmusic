@@ -19,22 +19,35 @@ type Track struct {
 	Thumbnail    string `json:"thumbnail"`
 }
 
+// SavedPlaylist represents a user-saved named playlist.
+type SavedPlaylist struct {
+	Name      string  `json:"name"`
+	Query     string  `json:"query,omitempty"`
+	Tracks    []Track `json:"tracks"`
+	CreatedAt int64   `json:"created_at"`
+}
+
 // AppState stores the persistent application state saved on exit and restored on startup.
 type AppState struct {
-	SearchQuery       string  `json:"search_query"`
-	ContinuationToken string  `json:"continuation_token"`
-	Playlist          []Track `json:"playlist"`
-	CurrentIndex      int     `json:"current_index"`
-	CurrentTrackID    string  `json:"current_track_id"`
-	PositionSec       float64 `json:"position_sec"`
-	WasPlaying        bool    `json:"was_playing"`
-	VideoEnabled      bool    `json:"video_enabled"`
-	PlaylistExpanded  bool    `json:"playlist_expanded"`
-	AlwaysOnTop       bool    `json:"always_on_top"`
-	Volume            float64 `json:"volume"`
-	Muted             bool    `json:"muted"`
-	WindowX           int     `json:"window_x"`
-	WindowY           int     `json:"window_y"`
+	SearchQuery       string          `json:"search_query"`
+	ContinuationToken string          `json:"continuation_token"`
+	Playlist          []Track         `json:"playlist"`
+	Overflow          []Track         `json:"overflow,omitempty"`
+	CurrentIndex      int             `json:"current_index"`
+	CurrentTrackID    string          `json:"current_track_id"`
+	PositionSec       float64         `json:"position_sec"`
+	WasPlaying        bool            `json:"was_playing"`
+	VideoEnabled      bool            `json:"video_enabled"`
+	PlaylistExpanded  bool            `json:"playlist_expanded"`
+	AlwaysOnTop       bool            `json:"always_on_top"`
+	Shuffle           bool            `json:"shuffle"`
+	RepeatMode        string          `json:"repeat_mode"`
+	LikedTracks       []Track         `json:"liked_tracks,omitempty"`
+	SavedPlaylists    []SavedPlaylist `json:"saved_playlists,omitempty"`
+	Volume            float64         `json:"volume"`
+	Muted             bool            `json:"muted"`
+	WindowX           int             `json:"window_x"`
+	WindowY           int             `json:"window_y"`
 }
 
 // CookieEntry represents a browser cookie captured during Google/YouTube login.
@@ -62,9 +75,13 @@ type AuthState struct {
 func DefaultAppState() AppState {
 	return AppState{
 		Playlist:         []Track{},
+		Overflow:         []Track{},
 		CurrentIndex:     -1,
 		VideoEnabled:     false,
 		PlaylistExpanded: true,
+		RepeatMode:       "off",
+		LikedTracks:      []Track{},
+		SavedPlaylists:   []SavedPlaylist{},
 		Volume:           0.8,
 		WindowX:          -1,
 		WindowY:          -1,
@@ -161,6 +178,20 @@ func LoadAppStateFrom(path string) (AppState, error) {
 func normalizeAppState(s *AppState) {
 	if s.Playlist == nil {
 		s.Playlist = []Track{}
+	}
+	if s.Overflow == nil {
+		s.Overflow = []Track{}
+	}
+	if s.LikedTracks == nil {
+		s.LikedTracks = []Track{}
+	}
+	if s.SavedPlaylists == nil {
+		s.SavedPlaylists = []SavedPlaylist{}
+	}
+	switch s.RepeatMode {
+	case "off", "all", "one":
+	default:
+		s.RepeatMode = "off"
 	}
 	if s.Volume < 0 || s.Volume > 1 {
 		s.Volume = 0.8

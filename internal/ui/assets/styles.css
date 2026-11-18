@@ -419,18 +419,18 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 6px;
+  gap: 4px;
 }
 
 .transport {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
 }
 
 .ctrl-btn {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 26px;
   border-radius: 7px;
   border: none;
   background: transparent;
@@ -446,24 +446,53 @@ html, body {
   background: var(--surface-hover);
 }
 
+.ctrl-btn.active {
+  color: #ff6b81;
+  background: var(--accent-soft);
+}
+
 .ctrl-btn svg {
-  width: 17px;
-  height: 17px;
+  width: 16px;
+  height: 16px;
 }
 
 .ctrl-btn.sm {
-  width: 24px;
+  width: 22px;
   height: 24px;
 }
 
 .ctrl-btn.sm svg {
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
+}
+
+.ctrl-btn.xs {
+  width: 22px;
+  height: 24px;
+  color: var(--text-dim);
+}
+
+.ctrl-btn.xs svg {
+  width: 14px;
+  height: 14px;
+}
+
+.ctrl-btn.xs.active {
+  color: #ff6b81;
+}
+
+.like-btn {
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+.like-btn.liked {
+  color: var(--accent);
 }
 
 .play-btn {
-  width: 34px;
-  height: 30px;
+  width: 30px;
+  height: 28px;
   border-radius: 8px;
   border: none;
   background: var(--accent);
@@ -485,18 +514,18 @@ html, body {
 }
 
 .play-btn svg {
-  width: 18px;
-  height: 18px;
+  width: 17px;
+  height: 17px;
 }
 
 .volume-wrap {
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
 }
 
 #volume-range {
-  width: 56px;
+  width: 44px;
   height: 4px;
   -webkit-appearance: none;
   appearance: none;
@@ -517,19 +546,19 @@ html, body {
 .mode-toggles {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
 }
 
 .toggle-pill {
-  height: 26px;
-  padding: 0 7px;
+  height: 25px;
+  padding: 0 6px;
   border-radius: 7px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-dim);
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
   font-size: 11px;
   font-weight: 500;
   cursor: pointer;
@@ -537,8 +566,8 @@ html, body {
 }
 
 .toggle-pill svg {
-  width: 13px;
-  height: 13px;
+  width: 12px;
+  height: 12px;
 }
 
 .toggle-pill:hover {
@@ -556,9 +585,7 @@ html, body {
 .playlist-drawer {
   flex: 1 1 0;
   min-height: 0;
-  overflow-y: auto;
   background: var(--bg);
-  padding: 6px;
   display: none;
   flex-direction: column;
 }
@@ -567,20 +594,116 @@ html, body {
   display: flex;
 }
 
-.playlist-drawer::-webkit-scrollbar {
+.drawer-toolbar {
+  flex: 0 0 auto;
+  padding: 6px 8px 5px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  background: rgba(16, 17, 22, 0.96);
+}
+
+.drawer-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tab-pill {
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.tab-pill:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.tab-pill.active {
+  background: var(--accent-soft);
+  border-color: rgba(255, 45, 85, 0.45);
+  color: #ff6b81;
+}
+
+.tab-pill.save-btn {
+  margin-left: auto;
+  color: var(--text);
+}
+
+.save-queue-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.save-queue-bar input,
+.filter-row input {
+  flex: 1;
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 11px;
+  outline: none;
+  user-select: text;
+}
+
+.save-queue-bar input:focus,
+.filter-row input:focus {
+  border-color: rgba(255, 45, 85, 0.55);
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.pill-btn.accent {
+  background: var(--accent);
+  border-color: transparent;
+  color: #fff;
+}
+
+.pill-btn.accent:hover {
+  background: #ff4468;
+}
+
+.playlist-scroll {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+}
+
+.playlist-scroll::-webkit-scrollbar {
   width: 6px;
 }
 
-.playlist-drawer::-webkit-scrollbar-track {
+.playlist-scroll::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.playlist-drawer::-webkit-scrollbar-thumb {
+.playlist-scroll::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.15);
   border-radius: 999px;
 }
 
-.playlist-drawer::-webkit-scrollbar-thumb:hover {
+.playlist-scroll::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.28);
 }
 
@@ -593,8 +716,8 @@ html, body {
 .track-item {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 8px;
+  gap: 7px;
+  padding: 5px 7px;
   border-radius: 7px;
   cursor: pointer;
   transition: background 0.12s ease;
@@ -607,6 +730,88 @@ html, body {
 .track-item.active {
   background: var(--accent-soft);
   border: 1px solid rgba(255, 45, 85, 0.28);
+}
+
+.track-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.track-item:hover .track-actions {
+  display: flex;
+}
+
+.track-item:hover .track-item-dur {
+  display: none;
+}
+
+.row-act-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-dim);
+  font-size: 11px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.row-act-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--text);
+}
+
+.row-act-btn.liked {
+  color: var(--accent);
+}
+
+.row-act-btn.danger:hover {
+  background: rgba(239, 68, 68, 0.24);
+  color: #fca5a5;
+}
+
+.saved-playlist-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.saved-playlist-item:hover {
+  background: var(--surface-hover);
+  border-color: rgba(255, 45, 85, 0.35);
+}
+
+.saved-playlist-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.saved-playlist-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.saved-playlist-sub {
+  font-size: 10.5px;
+  color: var(--text-dim);
+  margin-top: 2px;
 }
 
 .track-idx {
