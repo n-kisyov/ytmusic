@@ -125,6 +125,7 @@ func (a *App) Run(debug bool) error {
 			Title:  "ytmusic",
 			Width:  fixedWidth,
 			Height: uint(initialH),
+			IconId: 1,
 			Center: savedX < 0 || savedY < 0,
 		},
 	})

@@ -52,14 +52,17 @@ try {
         Write-Host "==> Cleaning previous build artifacts..." -ForegroundColor Yellow
         if (Test-Path $binDir) { Remove-Item -Recurse -Force $binDir }
         if (Test-Path $rootExe) { Remove-Item -Force $rootExe }
-        if (-not $Test -and -not $Run) {
-            # Still proceed to build unless only clean was desired? Standard build.ps1 cleans then builds.
-        }
+        $sysoFile = Join-Path $RootDir "cmd\ytmusic\rsrc_windows_amd64.syso"
+        if (Test-Path $sysoFile) { Remove-Item -Force $sysoFile }
     }
 
     Write-Host "==> Syncing Go module dependencies (go mod tidy)..." -ForegroundColor Cyan
     & go mod tidy
     if ($LASTEXITCODE -ne 0) { throw "go mod tidy failed." }
+
+    Write-Host "==> Generating embedded app icon & PE resources..." -ForegroundColor Cyan
+    & go run ./cmd/genicon
+    if ($LASTEXITCODE -ne 0) { throw "icon resource generation failed." }
 
     if ($Test) {
         Write-Host "==> Running Go tests..." -ForegroundColor Cyan
@@ -82,6 +85,22 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "go build failed." }
 
     Copy-Item -Path $binExe -Destination $rootExe -Force
+
+    # Notify Windows Explorer to refresh cached executable icons immediately.
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class ShellIconRefresh {
+    [DllImport("shell32.dll")]
+    public static extern void SHChangeNotify(uint wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
+}
+"@ -ErrorAction SilentlyContinue
+        [ShellIconRefresh]::SHChangeNotify(0x08000000, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero)
+        if (Get-Command ie4uinit.exe -ErrorAction SilentlyContinue) {
+            Start-Process -FilePath "ie4uinit.exe" -ArgumentList "-show" -NoNewWindow -ErrorAction SilentlyContinue
+        }
+    } catch {}
 
     $sizeMB = [Math]::Round(((Get-Item $binExe).Length / 1MB), 2)
     Write-Host "==> Build succeeded!" -ForegroundColor Green
