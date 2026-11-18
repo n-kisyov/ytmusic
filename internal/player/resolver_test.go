@@ -82,7 +82,7 @@ func TestLiveStreamResolve(t *testing.T) {
 	defer cancel()
 
 	resolver := NewResolver(nil)
-	url, err := resolver.Resolve(ctx, "dQw4w9WgXcQ")
+	url, err := resolver.Resolve(ctx, "2QzQUO3j0gE")
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -90,4 +90,29 @@ func TestLiveStreamResolve(t *testing.T) {
 		t.Fatalf("expected http stream URL, got %q", url)
 	}
 	t.Logf("resolved stream URL length=%d", len(url))
+
+	srv, err := NewServer(resolver, nil)
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	defer srv.Close()
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.StreamURL("2QzQUO3j0gE"), nil)
+	req.Header.Set("Range", "bytes=0-1023")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("proxy stream GET failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("expected 206 Partial Content from proxy, got %d", resp.StatusCode)
+	}
+	buf, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read proxy stream body failed: %v", err)
+	}
+	if len(buf) != 1024 {
+		t.Fatalf("expected 1024 bytes from range request, got %d", len(buf))
+	}
 }

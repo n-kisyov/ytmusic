@@ -112,9 +112,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		if rng := r.Header.Get("Range"); rng != "" {
 			req.Header.Set("Range", rng)
 		}
-		req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-		req.Header.Set("Referer", "https://www.youtube.com/")
-		req.Header.Set("Origin", "https://www.youtube.com")
+		req.Header.Set("User-Agent", androidUserAgent)
 
 		resp, err = s.proxyHTTP.Do(req)
 		if err != nil {

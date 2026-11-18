@@ -41,6 +41,13 @@ try {
     $binExe = Join-Path $binDir "ytmusic.exe"
     $rootExe = Join-Path $RootDir "ytmusic.exe"
 
+    $running = Get-Process ytmusic -ErrorAction SilentlyContinue
+    if ($running) {
+        Write-Host "==> Stopping running ytmusic instance before build..." -ForegroundColor Yellow
+        $running | Stop-Process -Force
+        Start-Sleep -Milliseconds 300
+    }
+
     if ($Clean) {
         Write-Host "==> Cleaning previous build artifacts..." -ForegroundColor Yellow
         if (Test-Path $binDir) { Remove-Item -Recurse -Force $binDir }

@@ -19,7 +19,10 @@ import (
 	"ytmusic/internal/config"
 )
 
-const streamCacheTTL = 90 * time.Minute
+const (
+	streamCacheTTL   = 90 * time.Minute
+	androidUserAgent = "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip"
+)
 
 type cachedStream struct {
 	URL       string
@@ -126,12 +129,15 @@ func (r *Resolver) Resolve(ctx context.Context, videoID string) (string, error) 
 }
 
 func (r *Resolver) resolveUncached(ctx context.Context, videoID string) (string, error) {
+	if url, err := r.resolveWithInnerTube(ctx, videoID); err == nil && url != "" {
+		return url, nil
+	}
 	if bin := r.getYtDlpPath(); bin != "" {
 		if url, err := r.resolveWithYtDlp(ctx, bin, videoID); err == nil && url != "" {
 			return url, nil
 		}
 	}
-	return r.resolveWithInnerTube(ctx, videoID)
+	return "", fmt.Errorf("unable to resolve playable stream for %s", videoID)
 }
 
 func (r *Resolver) getYtDlpPath() string {
@@ -168,6 +174,7 @@ func (r *Resolver) resolveWithYtDlp(ctx context.Context, bin, videoID string) (s
 	args := []string{
 		"-g",
 		"-f", "18/best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none]",
+		"--extractor-args", "youtube:player_client=android,web_safari",
 		"--no-playlist",
 		"--no-warnings",
 		"--socket-timeout", "10",
@@ -207,36 +214,45 @@ func (r *Resolver) resolveWithYtDlp(ctx context.Context, bin, videoID string) (s
 }
 
 func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (string, error) {
-	clients := []map[string]any{
+	type clientDef struct {
+		ctx       map[string]any
+		userAgent string
+	}
+	clients := []clientDef{
 		{
-			"clientName":        "IOS",
-			"clientVersion":     "19.45.4",
-			"deviceMake":        "Apple",
-			"deviceModel":       "iPhone16,2",
-			"osName":            "iPhone",
-			"osVersion":         "18.1.0.22B83",
-			"hl":                "en",
-			"gl":                "US",
-			"utcOffsetMinutes":  0,
+			ctx: map[string]any{
+				"clientName":        "ANDROID",
+				"clientVersion":     "20.10.38",
+				"androidSdkVersion": 34,
+				"osName":            "Android",
+				"osVersion":         "14",
+				"hl":                "en",
+				"gl":                "US",
+				"utcOffsetMinutes":  0,
+			},
+			userAgent: androidUserAgent,
 		},
 		{
-			"clientName":       "ANDROID_VR",
-			"clientVersion":    "1.60.19",
-			"deviceMake":       "Oculus",
-			"deviceModel":      "Quest 3",
-			"androidSdkVersion": 32,
-			"osName":           "Android",
-			"osVersion":        "12L",
-			"hl":               "en",
-			"gl":               "US",
+			ctx: map[string]any{
+				"clientName":       "IOS",
+				"clientVersion":    "19.45.4",
+				"deviceMake":       "Apple",
+				"deviceModel":      "iPhone16,2",
+				"osName":           "iPhone",
+				"osVersion":        "18.1.0.22B83",
+				"hl":               "en",
+				"gl":               "US",
+				"utcOffsetMinutes": 0,
+			},
+			userAgent: "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)",
 		},
 	}
 
 	var lastErr error
-	for _, clientCtx := range clients {
+	for _, cl := range clients {
 		payload := map[string]any{
 			"context": map[string]any{
-				"client": clientCtx,
+				"client": cl.ctx,
 			},
 			"videoId":        videoID,
 			"contentCheckOk": true,
@@ -249,7 +265,7 @@ func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (st
 			continue
 		}
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)")
+		req.Header.Set("User-Agent", cl.userAgent)
 
 		resp, err := r.httpClient.Do(req)
 		if err != nil {
@@ -283,25 +299,55 @@ func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (st
 			lastErr = err
 			continue
 		}
+
+		candidates := make([]string, 0, 8)
 		for _, f := range data.StreamingData.Formats {
-			if f.URL != "" && (f.Itag == 18 || strings.Contains(f.MimeType, "video/mp4")) {
-				return f.URL, nil
+			if f.URL != "" && f.Itag == 18 {
+				candidates = append(candidates, f.URL)
 			}
 		}
 		for _, f := range data.StreamingData.Formats {
-			if f.URL != "" {
-				return f.URL, nil
+			if f.URL != "" && f.Itag != 18 && strings.Contains(f.MimeType, "video/mp4") {
+				candidates = append(candidates, f.URL)
+			}
+		}
+		for _, f := range data.StreamingData.Formats {
+			if f.URL != "" && !strings.Contains(f.MimeType, "video/mp4") {
+				candidates = append(candidates, f.URL)
 			}
 		}
 		for _, f := range data.StreamingData.AdaptiveFormats {
 			if f.URL != "" && strings.HasPrefix(f.MimeType, "audio/mp4") {
-				return f.URL, nil
+				candidates = append(candidates, f.URL)
 			}
 		}
-		lastErr = errors.New("no playable format URL in player response")
+
+		for _, u := range candidates {
+			if r.probeStreamURL(ctx, u, cl.userAgent) {
+				return u, nil
+			}
+		}
+		lastErr = errors.New("no playable format URL passed probe")
 	}
 	if lastErr == nil {
 		lastErr = errors.New("failed to resolve stream URL")
 	}
 	return "", lastErr
+}
+
+func (r *Resolver) probeStreamURL(ctx context.Context, streamURL, ua string) bool {
+	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, streamURL, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Range", "bytes=0-1")
+	req.Header.Set("User-Agent", ua)
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent
 }
