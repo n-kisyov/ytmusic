@@ -107,6 +107,68 @@ public static class ShellIconRefresh {
     Write-Host "    Binary: $binExe ($sizeMB MB)" -ForegroundColor Green
     Write-Host "    Copy:   $rootExe" -ForegroundColor Green
 
+    Write-Host ""
+    Write-Host "==> Lines of Code Summary" -ForegroundColor Cyan
+    $langMap = @{
+        ".go"   = "Golang"
+        ".js"   = "JavaScript"
+        ".css"  = "CSS"
+        ".html" = "HTML"
+        ".ps1"  = "PowerShell"
+        ".md"   = "Markdown"
+        ".mod"  = "Go Module"
+    }
+    $stats = @{}
+    $sourceFiles = @(Get-ChildItem -Path $RootDir -Recurse -File | Where-Object {
+        $rel = $_.FullName.Substring($RootDir.Length).TrimStart('\', '/')
+        -not ($rel -match '^(?:\.git|bin)(?:\\|/|$)') -and $langMap.ContainsKey($_.Extension.ToLowerInvariant())
+    })
+    foreach ($f in $sourceFiles) {
+        $lang = $langMap[$f.Extension.ToLowerInvariant()]
+        if (-not $stats.ContainsKey($lang)) {
+            $stats[$lang] = [PSCustomObject]@{
+                Language = $lang
+                Files    = 0
+                Code     = 0
+                Blank    = 0
+                Total    = 0
+            }
+        }
+        $lines = [System.IO.File]::ReadAllLines($f.FullName)
+        $nonEmpty = 0
+        foreach ($line in $lines) {
+            if (-not [string]::IsNullOrWhiteSpace($line)) {
+                $nonEmpty++
+            }
+        }
+        $entry = $stats[$lang]
+        $entry.Files += 1
+        $entry.Total += $lines.Length
+        $entry.Code += $nonEmpty
+        $entry.Blank += ($lines.Length - $nonEmpty)
+    }
+
+    $rows = @($stats.Values | Sort-Object -Property Total -Descending)
+    $totalFiles = 0
+    $totalCode = 0
+    $totalBlank = 0
+    $totalLines = 0
+    foreach ($r in $rows) {
+        $totalFiles += $r.Files
+        $totalCode += $r.Code
+        $totalBlank += $r.Blank
+        $totalLines += $r.Total
+    }
+
+    Write-Host ("    {0,-14} {1,6} {2,8} {3,8} {4,8}" -f "Language", "Files", "Code", "Blank", "Total") -ForegroundColor DarkGray
+    Write-Host ("    {0,-14} {1,6} {2,8} {3,8} {4,8}" -f ("-" * 14), ("-" * 6), ("-" * 8), ("-" * 8), ("-" * 8)) -ForegroundColor DarkGray
+    foreach ($r in $rows) {
+        Write-Host ("    {0,-14} {1,6} {2,8} {3,8} {4,8}" -f $r.Language, $r.Files, $r.Code, $r.Blank, $r.Total)
+    }
+    Write-Host ("    {0,-14} {1,6} {2,8} {3,8} {4,8}" -f ("-" * 14), ("-" * 6), ("-" * 8), ("-" * 8), ("-" * 8)) -ForegroundColor DarkGray
+    Write-Host ("    {0,-14} {1,6} {2,8} {3,8} {4,8}" -f "TOTAL", $totalFiles, $totalCode, $totalBlank, $totalLines) -ForegroundColor White
+    Write-Host ""
+
     $ytdlp = Get-Command yt-dlp -ErrorAction SilentlyContinue
     if (-not $ytdlp) {
         $wingetLink = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\yt-dlp.exe"
