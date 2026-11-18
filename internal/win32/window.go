@@ -89,19 +89,20 @@ type Callbacks struct {
 
 // Controller manages the native Win32 window styles, DWM attributes, tray icon, and animations.
 type Controller struct {
-	hwnd        uintptr
-	origWndProc uintptr
-	hIcon       uintptr
-	trayAdded       bool
-	hidden          bool
-	alwaysOnTop     bool
-	revealed        bool
-	timerPeriodOn   bool
-	quitting        bool
-	savedRect       rect
-	resizeAnim      resizeAnimState
-	trayAnim        trayAnimState
-	callbacks       Callbacks
+	hwnd          uintptr
+	origWndProc   uintptr
+	hIcon         uintptr
+	trayAdded     bool
+	hidden        bool
+	alwaysOnTop   bool
+	isDark        bool
+	revealed      bool
+	timerPeriodOn bool
+	quitting      bool
+	savedRect     rect
+	resizeAnim    resizeAnimState
+	trayAnim      trayAnimState
+	callbacks     Callbacks
 }
 
 var (
@@ -142,9 +143,49 @@ var (
 	procTimeBeginPeriod = winmm.NewProc("timeBeginPeriod")
 	procTimeEndPeriod   = winmm.NewProc("timeEndPeriod")
 
-	dwmapi                  = windows.NewLazySystemDLL("dwmapi.dll")
+	dwmapi                    = windows.NewLazySystemDLL("dwmapi.dll")
 	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
+
+	procCreateSolidBrush = gdi32.NewProc("CreateSolidBrush")
+
+	bgBrushMu    sync.Mutex
+	darkBgBrush  uintptr
+	lightBgBrush uintptr
 )
+
+func bgBrush(dark bool) uintptr {
+	bgBrushMu.Lock()
+	defer bgBrushMu.Unlock()
+	if dark {
+		if darkBgBrush == 0 {
+			// Win32 COLORREF is 0x00BBGGRR (#0f0f0f).
+			darkBgBrush, _, _ = procCreateSolidBrush.Call(0x000F0F0F)
+		}
+		return darkBgBrush
+	}
+	if lightBgBrush == 0 {
+		// Win32 COLORREF is 0x00BBGGRR (#ffffff).
+		lightBgBrush, _, _ = procCreateSolidBrush.Call(0x00FFFFFF)
+	}
+	return lightBgBrush
+}
+
+func setWindowCloak(hwnd uintptr, cloaked bool) {
+	if hwnd == 0 || procDwmSetWindowAttribute.Find() != nil {
+		return
+	}
+	val := uint32(0)
+	if cloaked {
+		val = 1
+	}
+	procDwmSetWindowAttribute.Call(hwnd, dwmwaCloak, uintptr(unsafe.Pointer(&val)), unsafe.Sizeof(val))
+}
+
+func fillWindowBg(hwnd, hdc uintptr, dark bool) {
+	var rc rect
+	procGetClientRect.Call(hwnd, uintptr(unsafe.Pointer(&rc)))
+	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&rc)), bgBrush(dark))
+}
 
 type createStructW struct {
 	LpCreateParams uintptr
@@ -272,15 +313,22 @@ func startupPreShowWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	startupHookMu.Lock()
 	target := startupTarget
 	orig := startupOrigProc
+	isDark := startupDark
 	startupHookMu.Unlock()
 
-	if hwnd == target && (msg == wmShowWindow || msg == wmWindowPosChanging) {
-		exStyle := getWindowLongPtr(hwnd, gwlExStyle)
-		if (exStyle & wsExLayered) == 0 {
-			setWindowLongPtr(hwnd, gwlExStyle, exStyle|wsExLayered)
+	if hwnd == target {
+		switch msg {
+		case wmShowWindow, wmWindowPosChanging:
+			exStyle := getWindowLongPtr(hwnd, gwlExStyle)
+			if (exStyle & wsExLayered) == 0 {
+				setWindowLongPtr(hwnd, gwlExStyle, exStyle|wsExLayered)
+			}
+			procSetLayeredWindowAttributes.Call(hwnd, 0, 0, lwaAlpha)
+			setWindowCloak(hwnd, true)
+		case wmEraseBkgnd:
+			fillWindowBg(hwnd, wParam, isDark)
+			return 1
 		}
-		procSetLayeredWindowAttributes.Call(hwnd, 0, 0, lwaAlpha)
-		unhookStartupHook()
 	}
 
 	if orig != 0 {
@@ -334,6 +382,7 @@ func startupCBTHookProc(nCode int32, wParam uintptr, lParam unsafe.Pointer) uint
 					round := uint32(dwmwcpRound)
 					procDwmSetWindowAttribute.Call(wParam, dwmwaWindowCornerPreference, uintptr(unsafe.Pointer(&round)), unsafe.Sizeof(round))
 				}
+				setWindowCloak(wParam, true)
 			}
 		}
 	}
@@ -348,10 +397,14 @@ func NewController(hwnd unsafe.Pointer, cb Callbacks) *Controller {
 }
 
 func newController(h uintptr, cb Callbacks) *Controller {
+	startupHookMu.Lock()
+	isDark := startupDark
+	startupHookMu.Unlock()
 	unhookStartupHook()
 
 	c := &Controller{
 		hwnd:      h,
+		isDark:    isDark,
 		callbacks: cb,
 	}
 
@@ -495,6 +548,7 @@ func (c *Controller) SetAlwaysOnTop(enabled bool) {
 
 // SetDarkMode switches the Windows 11 native title bar between dark and light mode.
 func (c *Controller) SetDarkMode(dark bool) {
+	c.isDark = dark
 	if procDwmSetWindowAttribute.Find() == nil {
 		val := uint32(0)
 		if dark {
@@ -511,6 +565,7 @@ func (c *Controller) RevealWindow() {
 	}
 	c.revealed = true
 	if c.hidden || c.trayAnim.mode != trayAnimNone {
+		setWindowCloak(c.hwnd, false)
 		return
 	}
 	procSetLayeredWindowAttributes.Call(c.hwnd, 0, 255, lwaAlpha)
@@ -518,6 +573,8 @@ func (c *Controller) RevealWindow() {
 	if (exStyle & wsExLayered) != 0 {
 		setWindowLongPtr(c.hwnd, gwlExStyle, exStyle&^wsExLayered)
 	}
+	// Uncloak after restoring opacity and clearing WS_EX_LAYERED so DWM presents the first fully composited frame atomically.
+	setWindowCloak(c.hwnd, false)
 	procSetForegroundWindow.Call(c.hwnd)
 	c.SetAlwaysOnTop(c.alwaysOnTop)
 }
@@ -565,6 +622,7 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 
 	switch msg {
 	case wmEraseBkgnd:
+		fillWindowBg(hwnd, wParam, c.isDark)
 		return 1
 
 	case wmClose:

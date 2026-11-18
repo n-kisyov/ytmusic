@@ -126,6 +126,7 @@ func (c *Controller) MinimizeToTray() {
 // RestoreFromTray smoothly glides and fades the window back from the system tray at high FPS.
 func (c *Controller) RestoreFromTray() {
 	c.revealed = true
+	setWindowCloak(c.hwnd, false)
 	if !c.hidden && c.trayAnim.mode != trayAnimMinimize {
 		procSetForegroundWindow.Call(c.hwnd)
 		return
