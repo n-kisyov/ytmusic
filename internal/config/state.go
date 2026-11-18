@@ -40,6 +40,7 @@ type AppState struct {
 	VideoEnabled      bool            `json:"video_enabled"`
 	PlaylistExpanded  bool            `json:"playlist_expanded"`
 	AlwaysOnTop       bool            `json:"always_on_top"`
+	Theme             string          `json:"theme"`
 	Shuffle           bool            `json:"shuffle"`
 	RepeatMode        string          `json:"repeat_mode"`
 	LikedTracks       []Track         `json:"liked_tracks,omitempty"`
@@ -79,6 +80,7 @@ func DefaultAppState() AppState {
 		CurrentIndex:     -1,
 		VideoEnabled:     false,
 		PlaylistExpanded: true,
+		Theme:            "dark",
 		RepeatMode:       "off",
 		LikedTracks:      []Track{},
 		SavedPlaylists:   []SavedPlaylist{},
@@ -192,6 +194,11 @@ func normalizeAppState(s *AppState) {
 	case "off", "all", "one":
 	default:
 		s.RepeatMode = "off"
+	}
+	switch s.Theme {
+	case "dark", "light":
+	default:
+		s.Theme = "dark"
 	}
 	if s.Volume < 0 || s.Volume > 1 {
 		s.Volume = 0.8

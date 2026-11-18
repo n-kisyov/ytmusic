@@ -40,6 +40,7 @@ func TestAppStateSaveAndLoad(t *testing.T) {
 		VideoEnabled:     true,
 		PlaylistExpanded: false,
 		AlwaysOnTop:      true,
+		Theme:            "light",
 		Shuffle:          true,
 		RepeatMode:       "all",
 		LikedTracks: []Track{
@@ -80,6 +81,7 @@ func TestAppStateSaveAndLoad(t *testing.T) {
 		!loaded.VideoEnabled ||
 		loaded.PlaylistExpanded ||
 		!loaded.AlwaysOnTop ||
+		loaded.Theme != "light" ||
 		!loaded.Shuffle ||
 		loaded.RepeatMode != "all" ||
 		len(loaded.LikedTracks) != 1 ||

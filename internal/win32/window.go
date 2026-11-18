@@ -70,6 +70,8 @@ type Callbacks struct {
 	IsVideoEnabled       func() bool
 	OnToggleAlwaysOnTop  func()
 	IsAlwaysOnTop        func() bool
+	OnToggleTheme        func()
+	IsLightTheme         func() bool
 	OnToggleShuffle      func()
 	IsShuffleEnabled     func() bool
 	OnCycleRepeat        func()
@@ -277,6 +279,17 @@ func (c *Controller) SetAlwaysOnTop(enabled bool) {
 	procSetWindowPos.Call(c.hwnd, insertAfter, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoActivate)
 }
 
+// SetDarkMode switches the Windows 11 native title bar between dark and light mode.
+func (c *Controller) SetDarkMode(dark bool) {
+	if procDwmSetWindowAttribute.Find() == nil {
+		val := uint32(0)
+		if dark {
+			val = 1
+		}
+		procDwmSetWindowAttribute.Call(c.hwnd, dwmwaUseImmersiveDarkMode, uintptr(unsafe.Pointer(&val)), unsafe.Sizeof(val))
+	}
+}
+
 // BeginQuit marks the window as exiting, cleans up tray icon, and triggers WM_CLOSE destruction.
 func (c *Controller) BeginQuit() {
 	c.quitting = true
@@ -408,6 +421,11 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		case cmdToggleAlwaysOnTop:
 			if c.callbacks.OnToggleAlwaysOnTop != nil {
 				c.callbacks.OnToggleAlwaysOnTop()
+			}
+			return 0
+		case cmdToggleTheme:
+			if c.callbacks.OnToggleTheme != nil {
+				c.callbacks.OnToggleTheme()
 			}
 			return 0
 		case cmdToggleShuffle:

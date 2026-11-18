@@ -7,6 +7,9 @@
   const searchBtnIcon = document.getElementById('search-btn-icon');
   const searchSpinner = document.getElementById('search-spinner');
 
+  const themeBtn = document.getElementById('theme-btn');
+  const sunIcon = document.getElementById('sun-icon');
+  const moonIcon = document.getElementById('moon-icon');
   const pinBtn = document.getElementById('pin-btn');
   const authBtn = document.getElementById('auth-btn');
   const authPopover = document.getElementById('auth-popover');
@@ -75,6 +78,7 @@
     videoEnabled: false,
     playlistExpanded: true,
     alwaysOnTop: false,
+    theme: 'dark',
     shuffle: false,
     repeatMode: 'off', // 'off' | 'all' | 'one'
     shuffleHistory: [],
@@ -189,6 +193,16 @@
     state.alwaysOnTop = enabled;
     pinBtn.classList.toggle('active', enabled);
     pinBtn.title = enabled ? 'Stay on top: On' : 'Stay on top: Off';
+  }
+
+  function applyThemeUI(theme) {
+    const normalized = theme === 'light' ? 'light' : 'dark';
+    state.theme = normalized;
+    document.documentElement.setAttribute('data-theme', normalized);
+    const isLight = normalized === 'light';
+    sunIcon.classList.toggle('hidden', isLight);
+    moonIcon.classList.toggle('hidden', !isLight);
+    themeBtn.title = isLight ? 'Switch to Dark theme (T)' : 'Switch to Light theme (T)';
   }
 
   function applyAuthUI(auth) {
@@ -771,6 +785,13 @@
     await window.backendSetModes(state.shuffle, state.repeatMode).catch(() => {});
   }
 
+  async function toggleTheme() {
+    const next = state.theme === 'light' ? 'dark' : 'light';
+    applyThemeUI(next);
+    showToast(next === 'light' ? 'YouTube Light theme' : 'YouTube Dark theme');
+    await window.backendSetTheme(next).catch(() => {});
+  }
+
   function setupMediaSession() {
     if (!('mediaSession' in navigator)) return;
     const ms = navigator.mediaSession;
@@ -872,6 +893,8 @@
     showToast(next ? 'Stay on top: On' : 'Stay on top: Off');
     await window.backendToggleAlwaysOnTop(next);
   });
+
+  themeBtn.addEventListener('click', toggleTheme);
 
   tabQueue.addEventListener('click', () => {
     state.activeTab = 'queue';
@@ -1155,6 +1178,10 @@
       case 'R':
         await cycleRepeat();
         break;
+      case 't':
+      case 'T':
+        await toggleTheme();
+        break;
     }
   });
 
@@ -1175,6 +1202,9 @@
         break;
       case 'toggle_always_on_top':
         applyAlwaysOnTopUI(!state.alwaysOnTop);
+        break;
+      case 'toggle_theme':
+        applyThemeUI(state.theme === 'light' ? 'dark' : 'light');
         break;
       case 'toggle_shuffle':
         state.shuffle = !state.shuffle;
@@ -1225,6 +1255,7 @@
       applyVideoModeUI(Boolean(s.video_enabled));
       applyPlaylistModeUI(Boolean(s.playlist_expanded));
       applyAlwaysOnTopUI(Boolean(s.always_on_top));
+      applyThemeUI(s.theme || 'dark');
       updateModesUI();
       updateVolumeUI();
       applyAuthUI(init.auth || {});

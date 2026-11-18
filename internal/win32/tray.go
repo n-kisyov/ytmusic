@@ -43,6 +43,7 @@ const (
 	cmdSleep15           = 1011
 	cmdSleep30           = 1012
 	cmdSleep60           = 1013
+	cmdToggleTheme       = 1014
 )
 
 type guid struct {
@@ -241,6 +242,12 @@ func (c *Controller) showTrayMenu() {
 		topFlags |= mfChecked
 	}
 	appendItem(topFlags, cmdToggleAlwaysOnTop, "Always on Top")
+
+	themeFlags := uintptr(mfString)
+	if c.callbacks.IsLightTheme != nil && c.callbacks.IsLightTheme() {
+		themeFlags |= mfChecked
+	}
+	appendItem(themeFlags, cmdToggleTheme, "Light Theme")
 
 	sleepMin := 0
 	if c.callbacks.GetSleepTimerMinutes != nil {

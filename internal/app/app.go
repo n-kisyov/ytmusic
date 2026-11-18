@@ -114,6 +114,7 @@ func (a *App) Run(debug bool) error {
 	a.mu.Lock()
 	initialH := computeTargetHeight(a.state.VideoEnabled, a.state.PlaylistExpanded)
 	initialAlwaysOnTop := a.state.AlwaysOnTop
+	initialTheme := a.state.Theme
 	savedX, savedY := a.state.WindowX, a.state.WindowY
 	a.mu.Unlock()
 
@@ -190,6 +191,28 @@ func (a *App) Run(debug bool) error {
 			defer a.mu.Unlock()
 			return a.state.AlwaysOnTop
 		},
+		OnToggleTheme: func() {
+			a.mu.Lock()
+			if a.state.Theme == "light" {
+				a.state.Theme = "dark"
+			} else {
+				a.state.Theme = "light"
+			}
+			theme := a.state.Theme
+			snapshot := a.cloneStateLocked()
+			a.mu.Unlock()
+
+			_ = config.SaveAppState(snapshot)
+			w.Dispatch(func() {
+				a.winCtrl.SetDarkMode(theme != "light")
+				w.Eval("window.__trayCommand && window.__trayCommand('toggle_theme')")
+			})
+		},
+		IsLightTheme: func() bool {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			return a.state.Theme == "light"
+		},
 		OnToggleShuffle: func() {
 			a.mu.Lock()
 			a.state.Shuffle = !a.state.Shuffle
@@ -245,6 +268,7 @@ func (a *App) Run(debug bool) error {
 	a.winCtrl.SetClientSize(fixedWidth, initialH, false)
 	a.winCtrl.SetWindowPosition(savedX, savedY)
 	a.winCtrl.SetAlwaysOnTop(initialAlwaysOnTop)
+	a.winCtrl.SetDarkMode(initialTheme != "light")
 
 	a.updateTrayTitleLocked()
 	w.Navigate(a.server.BaseURL() + "/")
@@ -462,6 +486,26 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		if a.winCtrl != nil {
 			w.Dispatch(func() {
 				a.winCtrl.SetAlwaysOnTop(enabled)
+			})
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendSetTheme", func(theme string) error {
+		if theme != "light" {
+			theme = "dark"
+		}
+		a.mu.Lock()
+		a.state.Theme = theme
+		snapshot := a.cloneStateLocked()
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		if a.winCtrl != nil {
+			w.Dispatch(func() {
+				a.winCtrl.SetDarkMode(theme != "light")
 			})
 		}
 		return nil
