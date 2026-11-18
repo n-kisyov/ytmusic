@@ -292,6 +292,7 @@
       vu.splitter.connect(vu.analyserL, 0);
       vu.splitter.connect(vu.analyserR, 1);
       vu.graphAttached = true;
+      removeAudioUnlockListeners();
     } catch (_) {
       // Ignore if MediaElementSource cannot attach cleanly
     }
@@ -488,6 +489,24 @@
       vu.rafId = requestAnimationFrame(tickVuMeter);
     }
   }
+
+  function decayVuMeterToIdle() {
+    if (!vu.rafId && (vu.levelL > 0 || vu.levelR > 0 || vu.peakL > 0 || vu.peakR > 0)) {
+      vu.lastTs = 0;
+      vu.rafId = requestAnimationFrame(tickVuMeter);
+    }
+  }
+
+  function unlockAudioContextOnGesture() {
+    ensureAudioAnalyser();
+  }
+
+  function removeAudioUnlockListeners() {
+    document.removeEventListener('pointerdown', unlockAudioContextOnGesture);
+    document.removeEventListener('keydown', unlockAudioContextOnGesture);
+  }
+
+  drawVuMeter();
 
   function updateTabsUI() {
     tabQueue.classList.toggle('active', state.activeTab === 'queue');
@@ -1146,11 +1165,6 @@
     });
   }
 
-  function unlockAudioContextOnGesture() {
-    if (!vu.graphAttached && !media.paused && !media.ended) {
-      ensureAudioAnalyser();
-    }
-  }
   document.addEventListener('pointerdown', unlockAudioContextOnGesture);
   document.addEventListener('keydown', unlockAudioContextOnGesture);
 
@@ -1301,6 +1315,7 @@
 
   media.addEventListener('error', () => {
     videoLoading.classList.add('hidden');
+    decayVuMeterToIdle();
     if (!media.getAttribute('src')) return;
 
     const seq = state.playbackSeq;
@@ -1337,11 +1352,13 @@
 
   media.addEventListener('pause', () => {
     updatePlayButtonUI();
+    decayVuMeterToIdle();
     pushPlaybackState();
   });
 
   media.addEventListener('ended', () => {
     updatePlayButtonUI();
+    decayVuMeterToIdle();
     playNext(true);
   });
 
