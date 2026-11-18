@@ -29,12 +29,13 @@ const (
 )
 
 const (
-	cmdOpen        = 1001
-	cmdPlayPause   = 1002
-	cmdNext        = 1003
-	cmdPrev        = 1004
-	cmdToggleVideo = 1005
-	cmdExit        = 1006
+	cmdOpen              = 1001
+	cmdPlayPause         = 1002
+	cmdNext              = 1003
+	cmdPrev              = 1004
+	cmdToggleVideo       = 1005
+	cmdExit              = 1006
+	cmdToggleAlwaysOnTop = 1007
 )
 
 type guid struct {
@@ -202,6 +203,13 @@ func (c *Controller) showTrayMenu() {
 		videoFlags |= mfChecked
 	}
 	appendItem(videoFlags, cmdToggleVideo, "Video Playback")
+
+	topFlags := uintptr(mfString)
+	if c.callbacks.IsAlwaysOnTop != nil && c.callbacks.IsAlwaysOnTop() {
+		topFlags |= mfChecked
+	}
+	appendItem(topFlags, cmdToggleAlwaysOnTop, "Always on Top")
+
 	appendItem(mfSeparator, 0, "")
 	appendItem(mfString, cmdExit, "Exit")
 

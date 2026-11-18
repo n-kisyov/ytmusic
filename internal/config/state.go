@@ -30,6 +30,7 @@ type AppState struct {
 	WasPlaying        bool    `json:"was_playing"`
 	VideoEnabled      bool    `json:"video_enabled"`
 	PlaylistExpanded  bool    `json:"playlist_expanded"`
+	AlwaysOnTop       bool    `json:"always_on_top"`
 	Volume            float64 `json:"volume"`
 	Muted             bool    `json:"muted"`
 	WindowX           int     `json:"window_x"`

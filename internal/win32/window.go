@@ -33,6 +33,9 @@ const (
 	dwmwaUseImmersiveDarkMode    = 20
 	dwmwaWindowCornerPreference  = 33
 	dwmwcpRound                  = 2
+
+	hwndTopMost   = ^uintptr(0) // -1
+	hwndNoTopMost = ^uintptr(1) // -2
 )
 
 type rect struct {
@@ -49,13 +52,15 @@ type point struct {
 
 // Callbacks connects Win32 window/tray events back into the application layer.
 type Callbacks struct {
-	OnPlayPause    func()
-	OnNext         func()
-	OnPrev         func()
-	OnToggleVideo  func()
-	IsVideoEnabled func() bool
-	OnExit         func()
-	OnResizeNeeded func()
+	OnPlayPause         func()
+	OnNext              func()
+	OnPrev              func()
+	OnToggleVideo       func()
+	IsVideoEnabled      func() bool
+	OnToggleAlwaysOnTop func()
+	IsAlwaysOnTop       func() bool
+	OnExit              func()
+	OnResizeNeeded      func()
 }
 
 // Controller manages the native Win32 window styles, DWM attributes, tray icon, and animations.
@@ -65,6 +70,7 @@ type Controller struct {
 	hIcon       uintptr
 	trayAdded   bool
 	hidden      bool
+	alwaysOnTop bool
 	quitting    bool
 	savedRect   rect
 	resizeAnim  resizeAnimState
@@ -239,6 +245,16 @@ func (c *Controller) SetClientSize(logicalW, logicalH int, animate bool) {
 	procSetTimer.Call(c.hwnd, timerResizeID, animTickMs, 0)
 }
 
+// SetAlwaysOnTop toggles whether the window stays above non-topmost windows.
+func (c *Controller) SetAlwaysOnTop(enabled bool) {
+	c.alwaysOnTop = enabled
+	insertAfter := hwndNoTopMost
+	if enabled {
+		insertAfter = hwndTopMost
+	}
+	procSetWindowPos.Call(c.hwnd, insertAfter, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoActivate)
+}
+
 // BeginQuit marks the window as exiting, cleans up tray icon, and triggers WM_CLOSE destruction.
 func (c *Controller) BeginQuit() {
 	c.quitting = true
@@ -319,6 +335,11 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		case cmdToggleVideo:
 			if c.callbacks.OnToggleVideo != nil {
 				c.callbacks.OnToggleVideo()
+			}
+			return 0
+		case cmdToggleAlwaysOnTop:
+			if c.callbacks.OnToggleAlwaysOnTop != nil {
+				c.callbacks.OnToggleAlwaysOnTop()
 			}
 			return 0
 		case cmdExit:

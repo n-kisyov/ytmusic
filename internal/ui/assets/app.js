@@ -7,6 +7,7 @@
   const searchBtnIcon = document.getElementById('search-btn-icon');
   const searchSpinner = document.getElementById('search-spinner');
 
+  const pinBtn = document.getElementById('pin-btn');
   const authBtn = document.getElementById('auth-btn');
   const authPopover = document.getElementById('auth-popover');
   const authAccountName = document.getElementById('auth-account-name');
@@ -51,6 +52,7 @@
     currentIndex: -1,
     videoEnabled: false,
     playlistExpanded: true,
+    alwaysOnTop: false,
     volume: 0.8,
     muted: false,
     isSeeking: false,
@@ -107,6 +109,12 @@
     state.playlistExpanded = expanded;
     playlistDrawer.classList.toggle('open', expanded);
     playlistToggleBtn.classList.toggle('active', expanded);
+  }
+
+  function applyAlwaysOnTopUI(enabled) {
+    state.alwaysOnTop = enabled;
+    pinBtn.classList.toggle('active', enabled);
+    pinBtn.title = enabled ? 'Stay on top: On' : 'Stay on top: Off';
   }
 
   function applyAuthUI(auth) {
@@ -394,6 +402,13 @@
     await window.backendTogglePlaylist(next);
   });
 
+  pinBtn.addEventListener('click', async () => {
+    const next = !state.alwaysOnTop;
+    applyAlwaysOnTopUI(next);
+    showToast(next ? 'Stay on top: On' : 'Stay on top: Off');
+    await window.backendToggleAlwaysOnTop(next);
+  });
+
   authBtn.addEventListener('click', async () => {
     if (state.loggedIn) {
       authPopover.classList.toggle('hidden');
@@ -543,6 +558,9 @@
       case 'toggle_video':
         applyVideoModeUI(!state.videoEnabled);
         break;
+      case 'toggle_always_on_top':
+        applyAlwaysOnTopUI(!state.alwaysOnTop);
+        break;
     }
   };
 
@@ -568,6 +586,7 @@
       searchInput.value = s.search_query || '';
       applyVideoModeUI(Boolean(s.video_enabled));
       applyPlaylistModeUI(Boolean(s.playlist_expanded));
+      applyAlwaysOnTopUI(Boolean(s.always_on_top));
       updateVolumeUI();
       applyAuthUI(init.auth || {});
       renderPlaylist(true);

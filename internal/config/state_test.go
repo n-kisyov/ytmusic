@@ -36,6 +36,7 @@ func TestAppStateSaveAndLoad(t *testing.T) {
 		WasPlaying:       true,
 		VideoEnabled:     true,
 		PlaylistExpanded: false,
+		AlwaysOnTop:      true,
 		Volume:           0.65,
 		Muted:            false,
 		WindowX:          300,
@@ -60,6 +61,7 @@ func TestAppStateSaveAndLoad(t *testing.T) {
 		!loaded.WasPlaying ||
 		!loaded.VideoEnabled ||
 		loaded.PlaylistExpanded ||
+		!loaded.AlwaysOnTop ||
 		loaded.Volume != 0.65 ||
 		loaded.WindowX != 300 ||
 		loaded.WindowY != 200 {

@@ -207,6 +207,7 @@ func (c *Controller) stepTrayAnimation() {
 				swpNoZOrder,
 			)
 			procSetForegroundWindow.Call(c.hwnd)
+			c.SetAlwaysOnTop(c.alwaysOnTop)
 		}
 
 		// Cleanly restore opacity and remove layered style when idle.

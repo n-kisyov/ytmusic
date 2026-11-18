@@ -109,6 +109,7 @@ func (a *App) Run(debug bool) error {
 
 	a.mu.Lock()
 	initialH := computeTargetHeight(a.state.VideoEnabled, a.state.PlaylistExpanded)
+	initialAlwaysOnTop := a.state.AlwaysOnTop
 	savedX, savedY := a.state.WindowX, a.state.WindowY
 	a.mu.Unlock()
 
@@ -166,6 +167,24 @@ func (a *App) Run(debug bool) error {
 			defer a.mu.Unlock()
 			return a.state.VideoEnabled
 		},
+		OnToggleAlwaysOnTop: func() {
+			a.mu.Lock()
+			a.state.AlwaysOnTop = !a.state.AlwaysOnTop
+			enabled := a.state.AlwaysOnTop
+			snapshot := a.cloneStateLocked()
+			a.mu.Unlock()
+
+			_ = config.SaveAppState(snapshot)
+			w.Dispatch(func() {
+				a.winCtrl.SetAlwaysOnTop(enabled)
+				w.Eval("window.__trayCommand && window.__trayCommand('toggle_always_on_top')")
+			})
+		},
+		IsAlwaysOnTop: func() bool {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			return a.state.AlwaysOnTop
+		},
 		OnExit: func() {
 			a.quit()
 		},
@@ -173,6 +192,7 @@ func (a *App) Run(debug bool) error {
 
 	a.winCtrl.SetClientSize(fixedWidth, initialH, false)
 	a.winCtrl.SetWindowPosition(savedX, savedY)
+	a.winCtrl.SetAlwaysOnTop(initialAlwaysOnTop)
 
 	a.updateTrayTitleLocked()
 	w.Navigate(a.server.BaseURL() + "/")
@@ -371,6 +391,23 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		if a.winCtrl != nil {
 			w.Dispatch(func() {
 				a.winCtrl.SetClientSize(fixedWidth, targetH, true)
+			})
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendToggleAlwaysOnTop", func(enabled bool) error {
+		a.mu.Lock()
+		a.state.AlwaysOnTop = enabled
+		snapshot := a.cloneStateLocked()
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		if a.winCtrl != nil {
+			w.Dispatch(func() {
+				a.winCtrl.SetAlwaysOnTop(enabled)
 			})
 		}
 		return nil

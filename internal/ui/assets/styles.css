@@ -125,15 +125,21 @@ html, body {
   background: #ff4468;
 }
 
-.auth-btn, .quit-btn {
+.pin-btn, .auth-btn, .quit-btn {
   width: 30px;
   flex-shrink: 0;
   position: relative;
 }
 
-.auth-btn svg, .quit-btn svg {
+.pin-btn svg, .auth-btn svg, .quit-btn svg {
   width: 15px;
   height: 15px;
+}
+
+.pin-btn.active {
+  background: var(--accent-soft);
+  border-color: rgba(255, 45, 85, 0.45);
+  color: #ff6b81;
 }
 
 .auth-dot {
