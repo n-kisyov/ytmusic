@@ -1,9 +1,11 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -229,5 +231,38 @@ func TestSavedPlaylistCreateAddAndRemoveTrack(t *testing.T) {
 	}
 	if len(loaded.SavedPlaylists) != 1 || len(loaded.SavedPlaylists[0].Tracks) != 1 || loaded.SavedPlaylists[0].Tracks[0].ID != "t2" {
 		t.Fatalf("persisted playlist mismatch: %+v", loaded.SavedPlaylists)
+	}
+}
+
+func TestSaveAppStateToConcurrent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	var wg sync.WaitGroup
+	errs := make(chan error, 16)
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			st := DefaultAppState()
+			st.SearchQuery = fmt.Sprintf("query-%d", idx)
+			st.PositionSec = float64(idx)
+			if err := SaveAppStateTo(path, st); err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("concurrent SaveAppStateTo failed: %v", err)
+	}
+	loaded, err := LoadAppStateFrom(path)
+	if err != nil {
+		t.Fatalf("LoadAppStateFrom after concurrent writes failed: %v", err)
+	}
+	if !strings.HasPrefix(loaded.SearchQuery, "query-") {
+		t.Fatalf("unexpected persisted search query: %q", loaded.SearchQuery)
 	}
 }

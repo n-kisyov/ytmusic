@@ -835,7 +835,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 				pub := a.publicAuthState(newAuth)
 				raw, _ := json.Marshal(pub)
 				w.Dispatch(func() {
-					w.Eval("window.__onAuthUpdated && window.__onAuthUpdated(" + string(raw) + ")")
+					w.Eval("window.__onAuthUpdated && window.__onAuthUpdated(" + string(raw) + ", false)")
 				})
 			}
 		}()
@@ -863,9 +863,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 					a.authState.AccountName = acc.Name
 				}
 				a.authState.ChannelHandle = acc.Handle
-				if acc.AvatarURL != "" {
-					a.authState.AvatarURL = acc.AvatarURL
-				}
+				a.authState.AvatarURL = acc.AvatarURL
 				if acc.Email != "" {
 					a.authState.Email = acc.Email
 				}
@@ -1037,7 +1035,7 @@ func (a *App) refreshAndBroadcastAuth(w webview2.WebView) {
 	a.mu.Unlock()
 	raw, _ := json.Marshal(pub)
 	w.Dispatch(func() {
-		w.Eval("window.__onAuthUpdated && window.__onAuthUpdated(" + string(raw) + ")")
+		w.Eval("window.__onAuthUpdated && window.__onAuthUpdated(" + string(raw) + ", true)")
 	})
 }
 

@@ -234,7 +234,7 @@ func RunLoginWindow() error {
 
 		src := getWebViewSource(sender)
 		u, err := url.Parse(src)
-		if err != nil || !strings.HasSuffix(strings.ToLower(u.Hostname()), "youtube.com") {
+		if err != nil || !isYouTubeAppHost(u.Hostname()) {
 			return
 		}
 		if strings.HasPrefix(u.Path, "/channel_switcher") {
@@ -324,7 +324,8 @@ func RunLoginWindow() error {
 
 	// Catch SPA navigations off /channel_switcher or deferred ytcfg hydration cleanly.
 	chromium.Init(`(function(){
-		if (!location.hostname.endsWith('youtube.com')) return;
+		var h = (location.hostname || '').toLowerCase();
+		if (h !== 'www.youtube.com' && h !== 'm.youtube.com' && h !== 'music.youtube.com' && h !== 'youtube.com') return;
 		var timer = setInterval(function() {
 			var p = location.pathname || '/';
 			if (p.indexOf('/signin') === 0 || p.indexOf('/channel_switcher') === 0 || p.indexOf('/logout') === 0 || p.indexOf('/oops') === 0) {
@@ -395,6 +396,15 @@ const ytAuthProbeScript = `(function(){
 	check();
 })();`
 
+func isYouTubeAppHost(host string) bool {
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtube.com":
+		return true
+	default:
+		return false
+	}
+}
+
 func isIntermediateAuthPath(p string) bool {
 	return strings.HasPrefix(p, "/signin") ||
 		strings.HasPrefix(p, "/channel_switcher") ||
@@ -417,23 +427,27 @@ func ApplyProfileToAuthState(authState *config.AuthState, prof youtube.AccountPr
 	if prof.AccountName != "" {
 		authState.AccountName = prof.AccountName
 	}
-	if prof.ChannelHandle != "" {
-		authState.ChannelHandle = prof.ChannelHandle
-	}
 	if prof.Email != "" {
 		authState.Email = prof.Email
 	}
-	if prof.AvatarURL != "" {
+	if len(prof.Accounts) > 0 {
+		authState.Accounts = prof.Accounts
+		authState.ChannelHandle = prof.ChannelHandle
 		authState.AvatarURL = prof.AvatarURL
-	}
-	if prof.ActivePageID != "" {
 		authState.ActivePageID = prof.ActivePageID
+	} else {
+		if prof.ChannelHandle != "" {
+			authState.ChannelHandle = prof.ChannelHandle
+		}
+		if prof.AvatarURL != "" {
+			authState.AvatarURL = prof.AvatarURL
+		}
+		if prof.ActivePageID != "" {
+			authState.ActivePageID = prof.ActivePageID
+		}
 	}
 	if prof.AuthUser != "" {
 		authState.AuthUser = prof.AuthUser
-	}
-	if len(prof.Accounts) > 0 {
-		authState.Accounts = prof.Accounts
 	}
 	authState.NeedsReauth = false
 }

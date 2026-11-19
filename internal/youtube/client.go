@@ -108,7 +108,7 @@ func (c *Client) SearchInitialPlaylist(ctx context.Context, query string, target
 	page, err := c.postSearch(ctx, map[string]any{
 		"context": c.buildContext(),
 		"query":   query,
-		"params":  "EgIQAQ%3D%3D",
+		"params":  "EgIQAQ==",
 	})
 	if err != nil {
 		return SearchResult{}, err

@@ -4,7 +4,10 @@ package win32
 
 import (
 	"runtime"
+	"strings"
 	"testing"
+	"unicode/utf16"
+	"unicode/utf8"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -128,5 +131,38 @@ func TestStartupHookAppliesLayeredExactRectAndStripsResizeBeforeShow(t *testing.
 	ctrl.endHighResTimer()
 	if ctrl.timerPeriodOn {
 		t.Fatalf("expected timerPeriodOn=false after endHighResTimer")
+	}
+
+	// Verify MinimizeToTray triggered mid-restore animation preserves resting savedRect.
+	ctrl.savedRect = rect{Left: 200, Top: 150, Right: 580, Bottom: 630}
+	ctrl.trayAnim.mode = trayAnimRestore
+	ctrl.MinimizeToTray()
+	procKillTimer.Call(ctrl.hwnd, timerTrayAnimID)
+	ctrl.endHighResTimer()
+	if ctrl.savedRect.Left != 200 || ctrl.savedRect.Top != 150 {
+		t.Fatalf("expected savedRect preserved at (200,150) during mid-restore minimize, got (%d,%d)", ctrl.savedRect.Left, ctrl.savedRect.Top)
+	}
+}
+
+func TestTruncateTooltipUTF8AndSurrogates(t *testing.T) {
+	jp := strings.Repeat("初音ミク", 40) // 160 runes, > 400 UTF-8 bytes
+	out := truncateTooltip(jp, 120)
+	if !utf8.ValidString(out) {
+		t.Fatalf("truncated tooltip produced invalid UTF-8: %q", out)
+	}
+	if units := len(utf16.Encode([]rune(out))); units > 120 {
+		t.Fatalf("expected <= 120 UTF-16 code units, got %d", units)
+	}
+	if !strings.HasSuffix(out, "...") {
+		t.Fatalf("expected ellipsis suffix, got %q", out)
+	}
+
+	emoji := strings.Repeat("🎵", 70) // 70 astral runes = 140 UTF-16 surrogate units
+	outEmoji := truncateTooltip(emoji, 120)
+	if !utf8.ValidString(outEmoji) {
+		t.Fatalf("truncated emoji tooltip produced invalid UTF-8")
+	}
+	if units := len(utf16.Encode([]rune(outEmoji))); units > 120 {
+		t.Fatalf("expected <= 120 UTF-16 code units for emoji, got %d", units)
 	}
 }

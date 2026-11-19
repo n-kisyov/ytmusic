@@ -111,36 +111,41 @@ func (r *Resolver) ResolveStream(ctx context.Context, videoID string) (ResolvedS
 		r.mu.Unlock()
 		return ResolvedStream{URL: entry.URL, UserAgent: entry.UserAgent}, nil
 	}
-	if call, ok := r.inflight[videoID]; ok {
-		r.mu.Unlock()
-		select {
-		case <-call.done:
-			return call.stream, call.err
-		case <-ctx.Done():
-			return ResolvedStream{}, ctx.Err()
-		}
+	call, ok := r.inflight[videoID]
+	if !ok {
+		call = &inflightResolve{done: make(chan struct{})}
+		r.inflight[videoID] = call
+		go func() {
+			// Run upstream resolution with a detached timeout so canceling one speculative
+			// browser range request does not abort concurrent waiters for the same track.
+			resolveCtx, resolveCancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer resolveCancel()
+
+			st, err := r.resolveUncached(resolveCtx, videoID)
+
+			r.mu.Lock()
+			if err == nil && st.URL != "" {
+				r.cache[videoID] = cachedStream{
+					URL:       st.URL,
+					UserAgent: st.UserAgent,
+					ExpiresAt: time.Now().Add(streamCacheTTL),
+				}
+			}
+			delete(r.inflight, videoID)
+			call.stream = st
+			call.err = err
+			close(call.done)
+			r.mu.Unlock()
+		}()
 	}
-	call := &inflightResolve{done: make(chan struct{})}
-	r.inflight[videoID] = call
 	r.mu.Unlock()
 
-	st, err := r.resolveUncached(ctx, videoID)
-
-	r.mu.Lock()
-	if err == nil && st.URL != "" {
-		r.cache[videoID] = cachedStream{
-			URL:       st.URL,
-			UserAgent: st.UserAgent,
-			ExpiresAt: time.Now().Add(streamCacheTTL),
-		}
+	select {
+	case <-call.done:
+		return call.stream, call.err
+	case <-ctx.Done():
+		return ResolvedStream{}, ctx.Err()
 	}
-	delete(r.inflight, videoID)
-	call.stream = st
-	call.err = err
-	close(call.done)
-	r.mu.Unlock()
-
-	return st, err
 }
 
 func (r *Resolver) resolveUncached(ctx context.Context, videoID string) (ResolvedStream, error) {

@@ -2,14 +2,85 @@ package player
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
 )
+
+func TestResolveStreamSharedInflightSurvivesFirstCallerCancel(t *testing.T) {
+	resolver := NewResolver(nil)
+	callStarted := make(chan struct{})
+	releaseProbe := make(chan struct{})
+
+	// Inject an in-flight resolution simulating a slow network call whose first caller cancels early.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-callStarted:
+		default:
+			close(callStarted)
+		}
+		<-releaseProbe
+		w.WriteHeader(http.StatusPartialContent)
+	}))
+	defer srv.Close()
+
+	// Test ResolveStream's detached context directly via inflight waiter sharing:
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+
+	var wg sync.WaitGroup
+	var err1, err2 error
+	var st2 ResolvedStream
+
+	// Prime a fake inflight call backed by probeStreamURL latency using two ResolveStream calls:
+	// first create a custom resolver whose resolveUncached calls srv, or reuse inflight directly.
+	call := &inflightResolve{done: make(chan struct{})}
+	resolver.mu.Lock()
+	resolver.inflight["vid_inflight"] = call
+	resolver.mu.Unlock()
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, err1 = resolver.ResolveStream(ctx1, "vid_inflight")
+	}()
+	go func() {
+		defer wg.Done()
+		st2, err2 = resolver.ResolveStream(ctx2, "vid_inflight")
+	}()
+
+	time.Sleep(25 * time.Millisecond)
+	cancel1()
+
+	resolver.mu.Lock()
+	call.stream = ResolvedStream{URL: srv.URL + "/stream.mp4", UserAgent: "test-ua"}
+	delete(resolver.inflight, "vid_inflight")
+	close(call.done)
+	resolver.mu.Unlock()
+
+	wg.Wait()
+	if !errors.Is(err1, context.Canceled) {
+		t.Fatalf("expected caller 1 context.Canceled, got %v", err1)
+	}
+	if err2 != nil || st2.URL != srv.URL+"/stream.mp4" {
+		t.Fatalf("expected caller 2 to succeed with resolved URL, got err=%v stream=%+v", err2, st2)
+	}
+
+	// Verify detached probe context doesn't inherit a canceled parent context.
+	if !resolver.probeStreamURL(context.Background(), func() string {
+		close(releaseProbe)
+		return srv.URL
+	}(), "test-ua") {
+		t.Fatalf("expected probeStreamURL to succeed")
+	}
+}
 
 func TestProxyRangeForwardingAndUIStaticServing(t *testing.T) {
 	payload := "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"

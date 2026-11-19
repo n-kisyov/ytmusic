@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -70,7 +71,7 @@ func (s *Server) BaseURL() string {
 
 // StreamURL returns the local proxy URL for a given track ID.
 func (s *Server) StreamURL(videoID string) string {
-	return s.baseURL + "/stream?id=" + videoID
+	return s.baseURL + "/stream?id=" + url.QueryEscape(videoID)
 }
 
 // Close shuts down the local HTTP server gracefully.
@@ -153,7 +154,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "video/mp4")
 	}
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Cache-Control", "private, max-age=300")
 	w.WriteHeader(resp.StatusCode)
 
 	if r.Method == http.MethodHead {

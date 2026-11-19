@@ -99,8 +99,13 @@ func (c *Controller) MinimizeToTray() {
 
 	var cur rect
 	procGetWindowRect.Call(c.hwnd, uintptr(unsafe.Pointer(&cur)))
-	if (cur.Right - cur.Left) > 80 && (cur.Bottom - cur.Top) > 80 {
-		c.savedRect = cur
+	startX, startY := c.savedRect.Left, c.savedRect.Top
+	if (cur.Right-cur.Left) > 80 && (cur.Bottom-cur.Top) > 80 {
+		// Preserve resting savedRect if clicked mid-restore animation so coordinates don't drift.
+		if c.trayAnim.mode == trayAnimNone {
+			c.savedRect = cur
+		}
+		startX, startY = cur.Left, cur.Top
 	}
 
 	offX, offY := c.trayGlideOffset(c.savedRect)
@@ -115,8 +120,8 @@ func (c *Controller) MinimizeToTray() {
 	c.trayAnim = trayAnimState{
 		mode:      trayAnimMinimize,
 		startTime: time.Now(),
-		fromX:     c.savedRect.Left,
-		fromY:     c.savedRect.Top,
+		fromX:     startX,
+		fromY:     startY,
 		toX:       c.savedRect.Left + offX,
 		toY:       c.savedRect.Top + offY,
 	}

@@ -7,8 +7,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
+
+var fileWriteMu sync.Mutex
 
 // Track represents a playable YouTube song/video item in the playlist.
 type Track struct {
@@ -520,23 +523,29 @@ func WriteNetscapeCookies(path string, auth AuthState) error {
 }
 
 func writeFileAtomic(path string, data []byte) error {
+	fileWriteMu.Lock()
+	defer fileWriteMu.Unlock()
+
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create dir %s: %w", dir, err)
 	}
-	tmpPath := path + ".tmp"
-	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	f, err := os.CreateTemp(dir, filepath.Base(path)+".*.tmp")
 	if err != nil {
-		return fmt.Errorf("open temp file: %w", err)
+		return fmt.Errorf("create temp file: %w", err)
 	}
-	if _, err := f.Write(data); err != nil {
+	tmpPath := f.Name()
+	cleanup := func() {
 		_ = f.Close()
 		_ = os.Remove(tmpPath)
+	}
+	_ = f.Chmod(0o600)
+	if _, err := f.Write(data); err != nil {
+		cleanup()
 		return fmt.Errorf("write temp file: %w", err)
 	}
 	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
+		cleanup()
 		return fmt.Errorf("sync temp file: %w", err)
 	}
 	if err := f.Close(); err != nil {

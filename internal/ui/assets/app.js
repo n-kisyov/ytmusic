@@ -265,7 +265,7 @@
   }
 
   function syncVideoTimeIfDrifted(maxDrift = 0.3) {
-    if (!videoRenderer || videoRenderer.readyState < 1) return;
+    if (!videoRenderer || videoRenderer.readyState < 1 || videoRenderer.seeking) return;
     const targetTime = media.currentTime || 0;
     if (Math.abs((videoRenderer.currentTime || 0) - targetTime) > maxDrift) {
       try {
@@ -490,6 +490,10 @@
         currentThumb.src = tr.thumbnail;
         currentThumb.classList.remove('hidden');
         thumbPlaceholder.classList.add('hidden');
+      } else {
+        currentThumb.removeAttribute('src');
+        currentThumb.classList.add('hidden');
+        thumbPlaceholder.classList.remove('hidden');
       }
       const dur = Number.isFinite(media.duration) && media.duration > 0 ? media.duration : (tr.duration_sec || 0);
       timeTotal.textContent = formatTime(dur);
@@ -1277,6 +1281,7 @@
     if (state.playlist.length === 0) {
       state.currentIndex = -1;
       clearErrorSkipTimer();
+      videoLoading.classList.add('hidden');
       media.pause();
       media.removeAttribute('src');
       media.load();
@@ -1291,6 +1296,7 @@
       state.currentIndex--;
     } else if (removedActive) {
       const nextIdx = Math.min(idx, state.playlist.length - 1);
+      state.currentIndex = nextIdx;
       renderActiveDrawerView(false);
       await window.backendUpdatePlaylist(state.playlist, nextIdx).catch(() => {});
       await playTrackAt(nextIdx, true);
@@ -2106,10 +2112,10 @@
     }
   };
 
-  window.__onAuthUpdated = (auth) => {
+  window.__onAuthUpdated = (auth, silent = false) => {
     applyAuthUI(auth);
-    if (auth && auth.logged_in) {
-      showToast(`Signed in as ${auth.account_name || 'YouTube'}`);
+    if (!silent && auth && auth.logged_in) {
+      showToast(`Signed in as ${auth.account_name || auth.email || 'YouTube'}`);
     }
   };
 

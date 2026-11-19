@@ -146,14 +146,41 @@ func (c *Controller) initTray() {
 	c.trayAdded = r != 0
 }
 
+func truncateTooltip(tip string, maxUnits int) string {
+	if maxUnits <= 3 || tip == "" {
+		return ""
+	}
+	var out []rune
+	units := 0
+	for _, r := range tip {
+		rUnits := 1
+		if r > 0xFFFF {
+			rUnits = 2
+		}
+		if units+rUnits > maxUnits {
+			for len(out) > 0 && units > maxUnits-3 {
+				last := out[len(out)-1]
+				out = out[:len(out)-1]
+				if last > 0xFFFF {
+					units -= 2
+				} else {
+					units--
+				}
+			}
+			return string(out) + "..."
+		}
+		out = append(out, r)
+		units += rUnits
+	}
+	return tip
+}
+
 // UpdateTrayTooltip updates the hover tooltip on the tray icon.
 func (c *Controller) UpdateTrayTooltip(tip string) {
 	if !c.trayAdded {
 		return
 	}
-	if len(tip) > 120 {
-		tip = tip[:117] + "..."
-	}
+	tip = truncateTooltip(tip, 120)
 	var nid notifyIconDataW
 	nid.CbSize = uint32(unsafe.Sizeof(nid))
 	nid.Hwnd = c.hwnd
