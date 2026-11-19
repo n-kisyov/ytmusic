@@ -63,14 +63,46 @@ type CookieEntry struct {
 	HTTPOnly bool   `json:"http_only"`
 }
 
-// AuthState stores YouTube/Google account login credentials and cookies.
+// BrandAccount represents a primary Google channel or YouTube Brand Account under the signed-in session.
+type BrandAccount struct {
+	Name          string `json:"name"`
+	Handle        string `json:"handle,omitempty"`
+	Email         string `json:"email,omitempty"`
+	AvatarURL     string `json:"avatar_url,omitempty"`
+	PageID        string `json:"page_id,omitempty"`
+	AuthUser      string `json:"auth_user,omitempty"`
+	SubscriberTxt string `json:"subscriber_text,omitempty"`
+	Selected      bool   `json:"selected"`
+}
+
+// AuthState stores YouTube/Google account login credentials, active channel/Brand Account, and cookies.
 type AuthState struct {
 	LoggedIn      bool              `json:"logged_in"`
 	AccountName   string            `json:"account_name"`
+	ChannelHandle string            `json:"channel_handle,omitempty"`
 	Email         string            `json:"email"`
+	AvatarURL     string            `json:"avatar_url,omitempty"`
+	ActivePageID  string            `json:"active_page_id,omitempty"`
+	AuthUser      string            `json:"auth_user,omitempty"`
+	Accounts      []BrandAccount    `json:"accounts,omitempty"`
+	NeedsReauth   bool              `json:"needs_reauth,omitempty"`
 	Cookies       map[string]string `json:"cookies"`
 	CookieEntries []CookieEntry     `json:"cookie_entries,omitempty"`
 	UpdatedAt     int64             `json:"updated_at"`
+}
+
+// HasFullSessionCookies reports whether auth contains HttpOnly session cookies (not just document.cookie).
+func (a AuthState) HasFullSessionCookies() bool {
+	if !a.LoggedIn {
+		return false
+	}
+	if len(a.CookieEntries) > 0 {
+		return true
+	}
+	return a.Cookies["__Secure-3PSID"] != "" ||
+		a.Cookies["__Secure-1PSID"] != "" ||
+		a.Cookies["LOGIN_INFO"] != "" ||
+		(a.Cookies["HSID"] != "" && a.Cookies["SSID"] != "")
 }
 
 // DefaultAppState returns a clean initial state (audio-only by default).

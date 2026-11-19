@@ -39,6 +39,138 @@ func TestComputeSAPISIDHash(t *testing.T) {
 	}
 }
 
+func TestFetchAccountProfileWithBrandAccounts(t *testing.T) {
+	var seenPageHeader string
+	var seenOnBehalf string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPageHeader = r.Header.Get("X-Goog-PageId")
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if ctxMap, ok := body["context"].(map[string]any); ok {
+			if userMap, ok := ctxMap["user"].(map[string]any); ok {
+				seenOnBehalf, _ = userMap["onBehalfOfUser"].(string)
+			}
+		}
+
+		var resp map[string]any
+		switch {
+		case strings.Contains(r.URL.Path, "account_menu"):
+			resp = map[string]any{
+				"actions": []any{
+					map[string]any{
+						"openPopupAction": map[string]any{
+							"popup": map[string]any{
+								"multiPageMenuRenderer": map[string]any{
+									"header": map[string]any{
+										"activeAccountHeaderRenderer": map[string]any{
+											"accountName":   map[string]any{"simpleText": "Studio Brand"},
+											"channelHandle": map[string]any{"simpleText": "@studiobrand"},
+											"email":         map[string]any{"simpleText": "owner@example.com"},
+											"accountPhoto": map[string]any{
+												"thumbnails": []any{
+													map[string]any{"url": "https://yt3.ggpht.com/brand.jpg"},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+		case strings.Contains(r.URL.Path, "accounts_list"):
+			resp = map[string]any{
+				"actions": []any{
+					map[string]any{
+						"getMultiPageMenuAction": map[string]any{
+							"menu": map[string]any{
+								"multiPageMenuRenderer": map[string]any{
+									"sections": []any{
+										map[string]any{
+											"accountSectionListRenderer": map[string]any{
+												"contents": []any{
+													map[string]any{
+														"accountItemSectionRenderer": map[string]any{
+															"contents": []any{
+																map[string]any{
+																	"accountItemRenderer": map[string]any{
+																		"accountName":   map[string]any{"simpleText": "Personal Owner"},
+																		"accountByline": map[string]any{"simpleText": "owner@example.com"},
+																		"isSelected":    false,
+																		"accountPhoto": map[string]any{
+																			"thumbnails": []any{map[string]any{"url": "https://yt3.ggpht.com/owner.jpg"}},
+																		},
+																		"serviceEndpoint": map[string]any{
+																			"selectActiveIdentityEndpoint": map[string]any{
+																				"supportedTokens": []any{
+																					map[string]any{"datasyncIdToken": map[string]any{"datasyncIdToken": "||1122334455"}},
+																				},
+																			},
+																		},
+																	},
+																},
+																map[string]any{
+																	"accountItemRenderer": map[string]any{
+																		"accountName":   map[string]any{"simpleText": "Studio Brand"},
+																		"accountByline": map[string]any{"simpleText": "1.2K subscribers"},
+																		"channelHandle": map[string]any{"simpleText": "@studiobrand"},
+																		"isSelected":    true,
+																		"accountPhoto": map[string]any{
+																			"thumbnails": []any{map[string]any{"url": "https://yt3.ggpht.com/brand.jpg"}},
+																		},
+																		"serviceEndpoint": map[string]any{
+																			"selectActiveIdentityEndpoint": map[string]any{
+																				"supportedTokens": []any{
+																					map[string]any{"pageIdToken": map[string]any{"pageId": "109876543210"}},
+																				},
+																			},
+																		},
+																	},
+																},
+															},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.Client())
+	client.SetBaseURL(srv.URL)
+	client.SetAuth(config.AuthState{
+		LoggedIn:     true,
+		ActivePageID: "109876543210",
+		Cookies:      map[string]string{"SAPISID": "secret"},
+	})
+
+	prof, err := client.FetchAccountProfile(context.Background())
+	if err != nil {
+		t.Fatalf("FetchAccountProfile failed: %v", err)
+	}
+	if seenPageHeader != "109876543210" || seenOnBehalf != "109876543210" {
+		t.Fatalf("expected delegation headers/context set to 109876543210, got header=%q ctx=%q", seenPageHeader, seenOnBehalf)
+	}
+	if prof.AccountName != "Studio Brand" || prof.ChannelHandle != "@studiobrand" || prof.Email != "owner@example.com" {
+		t.Fatalf("unexpected profile identity: %+v", prof)
+	}
+	if len(prof.Accounts) != 2 || prof.Accounts[0].PageID != "" || prof.Accounts[1].PageID != "109876543210" || !prof.Accounts[1].Selected {
+		t.Fatalf("unexpected parsed brand accounts: %+v", prof.Accounts)
+	}
+}
+
 func TestSearchInitialPlaylistCollects30AndLoadMoreAppends(t *testing.T) {
 	makeVideo := func(i int) map[string]any {
 		return map[string]any{

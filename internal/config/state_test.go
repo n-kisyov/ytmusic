@@ -133,8 +133,17 @@ func TestAuthStateAndNetscapeCookies(t *testing.T) {
 	cookiesPath := filepath.Join(dir, "cookies.txt")
 
 	auth := AuthState{
-		LoggedIn:    true,
-		AccountName: "Test User",
+		LoggedIn:      true,
+		AccountName:   "Brand Studio",
+		ChannelHandle: "@brandstudio",
+		Email:         "owner@example.com",
+		AvatarURL:     "https://yt3.ggpht.com/avatar.jpg",
+		ActivePageID:  "109876543210987654321",
+		AuthUser:      "0",
+		Accounts: []BrandAccount{
+			{Name: "Personal User", Email: "owner@example.com", Selected: false},
+			{Name: "Brand Studio", Handle: "@brandstudio", PageID: "109876543210987654321", Selected: true},
+		},
 		Cookies: map[string]string{
 			"SAPISID": "abc123",
 			"SID":     "xyz789",
@@ -153,7 +162,9 @@ func TestAuthStateAndNetscapeCookies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadAuthStateFrom failed: %v", err)
 	}
-	if !loaded.LoggedIn || loaded.AccountName != "Test User" || loaded.Cookies["SAPISID"] != "abc123" {
+	if !loaded.LoggedIn || loaded.AccountName != "Brand Studio" || loaded.ChannelHandle != "@brandstudio" ||
+		loaded.ActivePageID != "109876543210987654321" || len(loaded.Accounts) != 2 || !loaded.HasFullSessionCookies() ||
+		loaded.Cookies["SAPISID"] != "abc123" {
 		t.Fatalf("loaded auth mismatch: %+v", loaded)
 	}
 

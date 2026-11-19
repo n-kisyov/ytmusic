@@ -46,7 +46,8 @@
       </button>
 
       <button id="auth-btn" type="button" class="icon-btn auth-btn" title="Sign in with Google">
-        <svg class="google-g" viewBox="0 0 24 24" aria-hidden="true">
+        <img id="auth-avatar-img" class="auth-avatar-btn hidden" src="" alt="" />
+        <svg id="auth-default-icon" class="google-g" viewBox="0 0 24 24" aria-hidden="true">
           <path fill="currentColor" d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/>
         </svg>
         <span id="auth-dot" class="auth-dot"></span>
@@ -61,11 +62,29 @@
 
     <!-- Account Popover (when signed in) -->
     <div id="auth-popover" class="auth-popover hidden">
-      <div class="auth-popover-info">
-        <span class="auth-label">YouTube Account</span>
-        <strong id="auth-account-name">Signed In</strong>
+      <div class="auth-popover-header">
+        <div class="auth-avatar-wrap">
+          <img id="auth-popover-avatar" src="" alt="" class="hidden" />
+          <span id="auth-popover-initial" class="auth-avatar-initial">Y</span>
+        </div>
+        <div class="auth-popover-info">
+          <strong id="auth-account-name" class="auth-account-name">YouTube Account</strong>
+          <span id="auth-account-meta" class="auth-account-meta"></span>
+        </div>
+      </div>
+      <div id="auth-reauth-banner" class="auth-reauth-banner hidden">
+        <span>Sign in again to load your real profile &amp; Brand Accounts.</span>
+        <button id="auth-reauth-btn" type="button" class="pill-btn accent">Refresh Sign-In</button>
+      </div>
+      <div id="auth-accounts-section" class="auth-accounts-section hidden">
+        <div class="auth-section-header">
+          <span class="auth-label">YouTube Channels</span>
+          <button id="auth-refresh-btn" type="button" class="auth-mini-link" title="Sync channels from YouTube">↻ Sync</button>
+        </div>
+        <div id="auth-accounts-list" class="auth-accounts-list"></div>
       </div>
       <div class="auth-popover-actions">
+        <button id="auth-switch-google-btn" type="button" class="pill-btn" title="Sign in with a different Google account">Switch Google</button>
         <button id="auth-signout-btn" type="button" class="pill-btn danger">Sign Out</button>
         <button id="auth-close-btn" type="button" class="pill-btn">Close</button>
       </div>

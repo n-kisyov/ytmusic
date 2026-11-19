@@ -334,6 +334,14 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			}
 		}
 
+		needsProfileSync := a.authState.LoggedIn &&
+			a.authState.HasFullSessionCookies() &&
+			(a.authState.AccountName == "" || a.authState.AccountName == "YouTube Account" || len(a.authState.Accounts) == 0)
+
+		if needsProfileSync {
+			go a.refreshAndBroadcastAuth(w)
+		}
+
 		return readyPayload{
 			State:     a.cloneStateLocked(),
 			Auth:      a.publicAuthState(a.authState),
@@ -775,7 +783,8 @@ func (a *App) bindMethods(w webview2.WebView) error {
 	}
 
 	if err := w.Bind("backendAuthAction", func(action string) (config.AuthState, error) {
-		if action == "logout" {
+		switch action {
+		case "logout":
 			_ = config.ClearAuthState(true)
 			empty := config.AuthState{Cookies: map[string]string{}}
 			a.mu.Lock()
@@ -784,6 +793,13 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			a.ytClient.SetAuth(empty)
 			a.resolver.SetAuth(empty)
 			return a.publicAuthState(empty), nil
+
+		case "refresh":
+			a.refreshAccountProfileSync()
+			a.mu.Lock()
+			cur := a.publicAuthState(a.authState)
+			a.mu.Unlock()
+			return cur, nil
 		}
 
 		a.mu.Lock()
@@ -793,6 +809,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			return cur, nil
 		}
 		a.authRunning = true
+		prevUpdatedAt := a.authState.UpdatedAt
 		cur := a.publicAuthState(a.authState)
 		a.mu.Unlock()
 
@@ -802,8 +819,13 @@ func (a *App) bindMethods(w webview2.WebView) error {
 				a.authRunning = false
 				a.mu.Unlock()
 			}()
+			if action == "switch_google" {
+				if dir, dirErr := config.AuthWebViewProfileDir(); dirErr == nil {
+					_ = os.RemoveAll(dir)
+				}
+			}
 			newAuth, err := auth.LaunchLoginHelper()
-			if err == nil && newAuth.LoggedIn {
+			if err == nil && newAuth.LoggedIn && newAuth.UpdatedAt != prevUpdatedAt {
 				a.mu.Lock()
 				a.authState = newAuth
 				a.mu.Unlock()
@@ -819,6 +841,51 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		}()
 
 		return cur, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendSwitchBrandAccount", func(pageID string, authUser string) (config.AuthState, error) {
+		a.mu.Lock()
+		if !a.authState.LoggedIn {
+			a.mu.Unlock()
+			return config.AuthState{}, fmt.Errorf("not signed in")
+		}
+		a.authState.ActivePageID = pageID
+		if authUser != "" {
+			a.authState.AuthUser = authUser
+		}
+		for i := range a.authState.Accounts {
+			acc := &a.authState.Accounts[i]
+			acc.Selected = acc.PageID == pageID
+			if acc.Selected {
+				if acc.Name != "" {
+					a.authState.AccountName = acc.Name
+				}
+				a.authState.ChannelHandle = acc.Handle
+				if acc.AvatarURL != "" {
+					a.authState.AvatarURL = acc.AvatarURL
+				}
+				if acc.Email != "" {
+					a.authState.Email = acc.Email
+				}
+			}
+		}
+		a.authState.UpdatedAt = time.Now().Unix()
+		updatedAuth := a.authState
+		a.mu.Unlock()
+
+		a.ytClient.SetAuth(updatedAuth)
+		a.resolver.SetAuth(updatedAuth)
+		a.refreshAccountProfileSync()
+
+		a.mu.Lock()
+		finalAuth := a.authState
+		pub := a.publicAuthState(finalAuth)
+		a.mu.Unlock()
+
+		_ = config.SaveAuthState(finalAuth)
+		return pub, nil
 	}); err != nil {
 		return err
 	}
@@ -936,12 +1003,61 @@ func (a *App) cloneStateLocked() config.AppState {
 	return cp
 }
 
+func (a *App) refreshAccountProfileSync() bool {
+	a.mu.Lock()
+	cur := a.authState
+	a.mu.Unlock()
+	if !cur.LoggedIn || !cur.HasFullSessionCookies() {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	prof, err := a.ytClient.FetchAccountProfile(ctx)
+	if err != nil {
+		return false
+	}
+
+	a.mu.Lock()
+	auth.ApplyProfileToAuthState(&a.authState, prof)
+	updated := a.authState
+	a.mu.Unlock()
+
+	a.ytClient.SetAuth(updated)
+	a.resolver.SetAuth(updated)
+	_ = config.SaveAuthState(updated)
+	return true
+}
+
+func (a *App) refreshAndBroadcastAuth(w webview2.WebView) {
+	if !a.refreshAccountProfileSync() || w == nil {
+		return
+	}
+	a.mu.Lock()
+	pub := a.publicAuthState(a.authState)
+	a.mu.Unlock()
+	raw, _ := json.Marshal(pub)
+	w.Dispatch(func() {
+		w.Eval("window.__onAuthUpdated && window.__onAuthUpdated(" + string(raw) + ")")
+	})
+}
+
 func (a *App) publicAuthState(in config.AuthState) config.AuthState {
+	needsReauth := in.NeedsReauth
+	if in.LoggedIn && !in.HasFullSessionCookies() {
+		needsReauth = true
+	}
+	accounts := append([]config.BrandAccount(nil), in.Accounts...)
 	return config.AuthState{
-		LoggedIn:    in.LoggedIn,
-		AccountName: in.AccountName,
-		Email:       in.Email,
-		UpdatedAt:   in.UpdatedAt,
+		LoggedIn:      in.LoggedIn,
+		AccountName:   in.AccountName,
+		ChannelHandle: in.ChannelHandle,
+		Email:         in.Email,
+		AvatarURL:     in.AvatarURL,
+		ActivePageID:  in.ActivePageID,
+		AuthUser:      in.AuthUser,
+		Accounts:      accounts,
+		NeedsReauth:   needsReauth,
+		UpdatedAt:     in.UpdatedAt,
 	}
 }
 

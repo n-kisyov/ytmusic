@@ -3,8 +3,10 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"strings"
@@ -17,9 +19,16 @@ import (
 	"golang.org/x/sys/windows"
 
 	"ytmusic/internal/config"
+	"ytmusic/internal/youtube"
 )
 
-const youtubeLoginURL = "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&passive=true&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26app%3Ddesktop%26hl%3Den%26next%3Dhttps%253A%252F%252Fwww.youtube.com%252F&hl=en"
+const (
+	youtubeLoginURL    = "https://accounts.google.com/ServiceLogin?service=youtube&uilel=3&continue=https%3A%2F%2Fwww.youtube.com%2Fsignin%3Faction_handle_signin%3Dtrue%26app%3Ddesktop%26hl%3Den%26next%3Dhttps%253A%252F%252Fwww.youtube.com%252F&hl=en"
+	youtubeSwitcherURL = "https://www.youtube.com/channel_switcher?next=%2F&feature=masthead_switcher"
+
+	wmSwitchChannel = 0x8010
+	wmFinishLogin   = 0x8011
+)
 
 var (
 	user32                    = windows.NewLazySystemDLL("user32.dll")
@@ -28,14 +37,18 @@ var (
 	procDefWindowProcW        = user32.NewProc("DefWindowProcW")
 	procShowWindow            = user32.NewProc("ShowWindow")
 	procUpdateWindow          = user32.NewProc("UpdateWindow")
+	procSetWindowTextW        = user32.NewProc("SetWindowTextW")
 	procGetMessageW           = user32.NewProc("GetMessageW")
 	procTranslateMessage      = user32.NewProc("TranslateMessage")
 	procDispatchMessageW      = user32.NewProc("DispatchMessageW")
+	procPostMessageW          = user32.NewProc("PostMessageW")
 	procPostQuitMessage       = user32.NewProc("PostQuitMessage")
 	procDestroyWindow         = user32.NewProc("DestroyWindow")
 	procGetSystemMetrics      = user32.NewProc("GetSystemMetrics")
 	dwmapi                    = windows.NewLazySystemDLL("dwmapi.dll")
 	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
+	ole32                     = windows.NewLazySystemDLL("ole32.dll")
+	procCoInitializeEx        = ole32.NewProc("CoInitializeEx")
 )
 
 type wndClassExW struct {
@@ -75,8 +88,10 @@ func LaunchLoginHelper() (config.AuthState, error) {
 	return config.LoadAuthState()
 }
 
-// RunLoginWindow opens a dedicated WebView2 sign-in window for Google/YouTube authentication.
+// RunLoginWindow opens a dedicated WebView2 sign-in window for Google/YouTube authentication
+// and Brand Account channel selection.
 func RunLoginWindow() error {
+	procCoInitializeEx.Call(0, 2) // ensure STA COM on current OS thread
 	dataDir, err := config.AuthWebViewProfileDir()
 	if err != nil {
 		return err
@@ -89,30 +104,35 @@ func RunLoginWindow() error {
 	chromium := edge.NewChromium()
 	chromium.DataPath = dataDir
 
-	var hwnd uintptr
-	var doneOnce sync.Once
-	var accountName string
-	var webviewPtr *edge.ICoreWebView2
+	var (
+		hwnd            uintptr
+		doneOnce        sync.Once
+		stateMu         sync.Mutex
+		webviewPtr      *edge.ICoreWebView2
+		checkingAuth    bool
+		visitedSwitcher bool
+		pendingAuth     *config.AuthState
+	)
 
-	finishLogin := func(cookies map[string]string, entries []config.CookieEntry, name string) {
-		if len(cookies) == 0 {
+	setWindowTitle := func(text string) {
+		if hwnd == 0 {
 			return
 		}
-		if cookies["SAPISID"] == "" && cookies["__Secure-3PAPISID"] == "" && cookies["SID"] == "" {
-			return
+		ptr, err := windows.UTF16PtrFromString(text)
+		if err == nil {
+			procSetWindowTextW.Call(hwnd, uintptr(unsafe.Pointer(ptr)))
 		}
-		if name == "" {
-			name = "YouTube Account"
+	}
+
+	commitFinish := func() {
+		stateMu.Lock()
+		finalAuth := pendingAuth
+		stateMu.Unlock()
+		if finalAuth == nil {
+			return
 		}
 		doneOnce.Do(func() {
-			state := config.AuthState{
-				LoggedIn:      true,
-				AccountName:   name,
-				Cookies:       cookies,
-				CookieEntries: entries,
-				UpdatedAt:     time.Now().Unix(),
-			}
-			_ = config.SaveAuthState(state)
+			_ = config.SaveAuthState(*finalAuth)
 			if hwnd != 0 {
 				procDestroyWindow.Call(hwnd)
 			}
@@ -124,57 +144,112 @@ func RunLoginWindow() error {
 			Type        string `json:"type"`
 			LoggedIn    bool   `json:"logged_in"`
 			AccountName string `json:"account_name"`
-			Cookies     string `json:"cookies"`
+			Email       string `json:"email"`
+			PageID      string `json:"page_id"`
+			AuthUser    string `json:"auth_user"`
+			PagePath    string `json:"page_path"`
 		}
-		if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+		if err := json.Unmarshal([]byte(raw), &msg); err != nil || !msg.LoggedIn {
 			return
 		}
-		if msg.AccountName != "" {
-			accountName = msg.AccountName
-		}
-		if !msg.LoggedIn {
+		if isIntermediateAuthPath(msg.PagePath) {
 			return
 		}
 
-		// First attempt full WebView2 CookieManager extraction (captures HttpOnly SID / __Secure-* cookies).
-		if webviewPtr != nil {
-			extractAllCookies(webviewPtr, func(cookies map[string]string, entries []config.CookieEntry) {
-				if len(cookies) > 0 {
-					finishLogin(cookies, entries, accountName)
-					return
-				}
-				// Fallback to document.cookie pairs if CookieManager returned nothing.
-				parsed := parseDocumentCookie(msg.Cookies)
-				finishLogin(parsed, nil, accountName)
-			})
+		stateMu.Lock()
+		wv := webviewPtr
+		if wv == nil || checkingAuth || pendingAuth != nil {
+			stateMu.Unlock()
 			return
 		}
-		parsed := parseDocumentCookie(msg.Cookies)
-		finishLogin(parsed, nil, accountName)
+		checkingAuth = true
+		stateMu.Unlock()
+
+		extractAllCookies(wv, "https://www.youtube.com", func(cookies map[string]string, entries []config.CookieEntry) {
+			if !hasRequiredSessionCookies(cookies) {
+				stateMu.Lock()
+				checkingAuth = false
+				stateMu.Unlock()
+				return
+			}
+
+			go func(baseCookies map[string]string, baseEntries []config.CookieEntry) {
+				authState := config.AuthState{
+					LoggedIn:      true,
+					AccountName:   strings.TrimSpace(msg.AccountName),
+					Email:         strings.TrimSpace(msg.Email),
+					ActivePageID:  strings.TrimSpace(msg.PageID),
+					AuthUser:      strings.TrimSpace(msg.AuthUser),
+					Cookies:       baseCookies,
+					CookieEntries: baseEntries,
+					UpdatedAt:     time.Now().Unix(),
+				}
+				if authState.AuthUser == "" {
+					authState.AuthUser = "0"
+				}
+
+				ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+				defer cancel()
+				ytClient := youtube.NewClient(nil)
+				ytClient.SetAuth(authState)
+				prof, profErr := ytClient.FetchAccountProfile(ctx)
+				if profErr == nil {
+					ApplyProfileToAuthState(&authState, prof)
+				}
+
+				stateMu.Lock()
+				shouldOpenSwitcher := !visitedSwitcher && len(authState.Accounts) > 1
+				if shouldOpenSwitcher {
+					visitedSwitcher = true
+					checkingAuth = false
+					stateMu.Unlock()
+					if hwnd != 0 {
+						procPostMessageW.Call(hwnd, wmSwitchChannel, 0, 0)
+					}
+					return
+				}
+
+				if authState.AccountName == "" {
+					if authState.Email != "" {
+						authState.AccountName = authState.Email
+					} else {
+						authState.AccountName = "YouTube Account"
+					}
+				}
+				pendingAuth = &authState
+				checkingAuth = false
+				stateMu.Unlock()
+
+				if hwnd != 0 {
+					procPostMessageW.Call(hwnd, wmFinishLogin, 0, 0)
+				}
+			}(cookies, entries)
+		})
 	}
 
 	chromium.NavigationCompletedCallback = func(sender *edge.ICoreWebView2, _ *edge.ICoreWebView2NavigationCompletedEventArgs) {
+		stateMu.Lock()
 		webviewPtr = sender
+		stateMu.Unlock()
+
 		src := getWebViewSource(sender)
-		if strings.Contains(src, "youtube.com") {
-			chromium.Eval(`(function(){
-				try {
-					var cfg = (window.ytcfg && window.ytcfg.data_) || {};
-					var loggedIn = Boolean(cfg.LOGGED_IN) || document.cookie.indexOf('SAPISID=') !== -1;
-					var name = cfg.USER_DISPLAY_NAME || '';
-					if (!name) {
-						var el = document.querySelector('#account-name, yt-formatted-string#account-name');
-						if (el && el.textContent) name = el.textContent.trim();
-					}
-					window.chrome.webview.postMessage(JSON.stringify({
-						type: 'auth_check',
-						logged_in: loggedIn,
-						account_name: name,
-						cookies: document.cookie || ''
-					}));
-				} catch (e) {}
-			})();`)
+		u, err := url.Parse(src)
+		if err != nil || !strings.HasSuffix(strings.ToLower(u.Hostname()), "youtube.com") {
+			return
 		}
+		if strings.HasPrefix(u.Path, "/channel_switcher") {
+			stateMu.Lock()
+			visitedSwitcher = true
+			stateMu.Unlock()
+			setWindowTitle("Select YouTube Brand Account — ytmusic")
+			return
+		}
+		if isIntermediateAuthPath(u.Path) {
+			return
+		}
+
+		setWindowTitle("Signing in to YouTube — ytmusic")
+		chromium.Eval(ytAuthProbeScript)
 	}
 
 	wndProc := windows.NewCallback(func(h, msg, wp, lp uintptr) uintptr {
@@ -184,6 +259,13 @@ func RunLoginWindow() error {
 			return 0
 		case 0x0046, 0x0003: // WM_MOVE
 			_ = chromium.NotifyParentWindowPositionChanged()
+		case wmSwitchChannel:
+			setWindowTitle("Select YouTube Brand Account — ytmusic")
+			chromium.Navigate(youtubeSwitcherURL)
+			return 0
+		case wmFinishLogin:
+			commitFinish()
+			return 0
 		case 0x0010: // WM_CLOSE
 			procDestroyWindow.Call(h)
 			return 0
@@ -208,7 +290,7 @@ func RunLoginWindow() error {
 
 	sw, _, _ := procGetSystemMetrics.Call(0)
 	sh, _, _ := procGetSystemMetrics.Call(1)
-	winW, winH := uintptr(480), uintptr(660)
+	winW, winH := uintptr(500), uintptr(680)
 	posX := (sw - winW) / 2
 	posY := (sh - winH) / 2
 
@@ -240,29 +322,19 @@ func RunLoginWindow() error {
 	}
 	chromium.Resize()
 
-	// Inject periodic watcher on youtube.com pages so sign-in finishes right after redirect.
+	// Catch SPA navigations off /channel_switcher or deferred ytcfg hydration cleanly.
 	chromium.Init(`(function(){
-		window.addEventListener('DOMContentLoaded', function() {
-			if (!location.hostname.endsWith('youtube.com')) return;
-			var checks = 0;
-			var timer = setInterval(function() {
-				checks++;
-				var cfg = (window.ytcfg && window.ytcfg.data_) || {};
-				var loggedIn = Boolean(cfg.LOGGED_IN) || document.cookie.indexOf('SAPISID=') !== -1;
-				if (loggedIn || checks > 40) {
-					if (loggedIn) {
-						clearInterval(timer);
-						var name = cfg.USER_DISPLAY_NAME || '';
-						window.chrome.webview.postMessage(JSON.stringify({
-							type: 'auth_check',
-							logged_in: true,
-							account_name: name,
-							cookies: document.cookie || ''
-						}));
-					}
-				}
-			}, 400);
-		});
+		if (!location.hostname.endsWith('youtube.com')) return;
+		var timer = setInterval(function() {
+			var p = location.pathname || '/';
+			if (p.indexOf('/signin') === 0 || p.indexOf('/channel_switcher') === 0 || p.indexOf('/logout') === 0 || p.indexOf('/oops') === 0) {
+				return;
+			}
+			var cfg = (window.ytcfg && window.ytcfg.data_) || null;
+			if (!cfg || !cfg.LOGGED_IN) return;
+			clearInterval(timer);
+			` + ytAuthExtractBody + `
+		}, 450);
 	})();`)
 
 	chromium.Navigate(youtubeLoginURL)
@@ -279,20 +351,91 @@ func RunLoginWindow() error {
 	return nil
 }
 
-func parseDocumentCookie(raw string) map[string]string {
-	out := make(map[string]string)
-	for _, part := range strings.Split(raw, ";") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
+const ytAuthExtractBody = `
+	try {
+		var cfg = (window.ytcfg && window.ytcfg.data_) || {};
+		if (!cfg.LOGGED_IN) return;
+		var name = cfg.USER_DISPLAY_NAME || '';
+		if (!name) {
+			var el = document.querySelector('#account-name, yt-formatted-string#account-name');
+			if (el && el.textContent) name = el.textContent.trim();
 		}
-		idx := strings.IndexByte(part, '=')
-		if idx <= 0 {
-			continue
+		var pageId = cfg.DELEGATED_SESSION_ID || '';
+		if (!pageId && typeof cfg.DATASYNC_ID === 'string' && cfg.DATASYNC_ID.indexOf('||') > 0) {
+			pageId = cfg.DATASYNC_ID.split('||')[0] || '';
 		}
-		out[strings.TrimSpace(part[:idx])] = strings.TrimSpace(part[idx+1:])
+		var authUser = (cfg.SESSION_INDEX !== undefined && cfg.SESSION_INDEX !== null) ? String(cfg.SESSION_INDEX) : '0';
+		window.chrome.webview.postMessage(JSON.stringify({
+			type: 'auth_check',
+			logged_in: true,
+			account_name: name,
+			email: cfg.ACCOUNT_EMAIL || '',
+			page_id: pageId,
+			auth_user: authUser,
+			page_path: location.pathname || '/'
+		}));
+	} catch (e) {}
+`
+
+const ytAuthProbeScript = `(function(){
+	var attempts = 0;
+	function check() {
+		attempts++;
+		var p = location.pathname || '/';
+		if (p.indexOf('/signin') === 0 || p.indexOf('/channel_switcher') === 0 || p.indexOf('/logout') === 0) return;
+		var cfg = (window.ytcfg && window.ytcfg.data_) || null;
+		if (cfg && cfg.LOGGED_IN) {
+			` + ytAuthExtractBody + `
+			return;
+		}
+		if (attempts < 12) {
+			setTimeout(check, 350);
+		}
 	}
-	return out
+	check();
+})();`
+
+func isIntermediateAuthPath(p string) bool {
+	return strings.HasPrefix(p, "/signin") ||
+		strings.HasPrefix(p, "/channel_switcher") ||
+		strings.HasPrefix(p, "/logout") ||
+		strings.HasPrefix(p, "/oops") ||
+		strings.HasPrefix(p, "/select_site")
+}
+
+func hasRequiredSessionCookies(cookies map[string]string) bool {
+	if len(cookies) == 0 {
+		return false
+	}
+	hasAPISID := cookies["SAPISID"] != "" || cookies["__Secure-3PAPISID"] != ""
+	hasSID := cookies["SID"] != "" || cookies["__Secure-3PSID"] != "" || cookies["__Secure-1PSID"] != ""
+	return hasAPISID && hasSID
+}
+
+// ApplyProfileToAuthState merges InnerTube account metadata and Brand Accounts onto an AuthState.
+func ApplyProfileToAuthState(authState *config.AuthState, prof youtube.AccountProfile) {
+	if prof.AccountName != "" {
+		authState.AccountName = prof.AccountName
+	}
+	if prof.ChannelHandle != "" {
+		authState.ChannelHandle = prof.ChannelHandle
+	}
+	if prof.Email != "" {
+		authState.Email = prof.Email
+	}
+	if prof.AvatarURL != "" {
+		authState.AvatarURL = prof.AvatarURL
+	}
+	if prof.ActivePageID != "" {
+		authState.ActivePageID = prof.ActivePageID
+	}
+	if prof.AuthUser != "" {
+		authState.AuthUser = prof.AuthUser
+	}
+	if len(prof.Accounts) > 0 {
+		authState.Accounts = prof.Accounts
+	}
+	authState.NeedsReauth = false
 }
 
 // --- COM Helpers for ICoreWebView2_2::GetCookieManager ---
@@ -358,7 +501,7 @@ var (
 	}
 )
 
-func extractAllCookies(wv *edge.ICoreWebView2, done func(cookies map[string]string, entries []config.CookieEntry)) {
+func extractAllCookies(wv *edge.ICoreWebView2, targetURI string, done func(cookies map[string]string, entries []config.CookieEntry)) {
 	obj := unsafe.Pointer(wv)
 	iid2 := edge.NewGUID("{9E8F0CF8-E670-4B5E-B2BC-73E061E3184C}")
 	var wv2 unsafe.Pointer
@@ -390,6 +533,7 @@ func extractAllCookies(wv *edge.ICoreWebView2, done func(cookies map[string]stri
 		// ICoreWebView2CookieList: slot 3 = get_Count
 		syscall.SyscallN(comVtblSlot(list, 3), uintptr(list), uintptr(unsafe.Pointer(&count)))
 		cookies := make(map[string]string, count)
+		cookiePath := make(map[string]string, count)
 		entries := make([]config.CookieEntry, 0, count)
 
 		for i := uint32(0); i < count; i++ {
@@ -425,7 +569,11 @@ func extractAllCookies(wv *edge.ICoreWebView2, done func(cookies map[string]stri
 			syscall.SyscallN(comVtblSlot(ck, 2), uintptr(ck)) // Release cookie
 
 			if name != "" {
-				cookies[name] = value
+				// Prefer root "/" path cookies when duplicate names exist across paths.
+				if _, exists := cookies[name]; !exists || cpath == "/" || len(cpath) < len(cookiePath[name]) {
+					cookies[name] = value
+					cookiePath[name] = cpath
+				}
 				entries = append(entries, config.CookieEntry{
 					Name:     name,
 					Value:    value,
@@ -444,7 +592,7 @@ func extractAllCookies(wv *edge.ICoreWebView2, done func(cookies map[string]stri
 	cookieHandlerStore[handlerPtr] = handler
 	cookieHandlerMu.Unlock()
 
-	uri, _ := windows.UTF16PtrFromString("https://www.youtube.com")
+	uri, _ := windows.UTF16PtrFromString(targetURI)
 	// ICoreWebView2CookieManager: slot 5 = GetCookies
 	hr, _, _ = syscall.SyscallN(comVtblSlot(cm, 5), uintptr(cm), uintptr(unsafe.Pointer(uri)), handlerPtr)
 	if int32(hr) < 0 {

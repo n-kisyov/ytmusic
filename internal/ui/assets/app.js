@@ -14,8 +14,19 @@
   const moonIcon = document.getElementById('moon-icon');
   const pinBtn = document.getElementById('pin-btn');
   const authBtn = document.getElementById('auth-btn');
+  const authAvatarImg = document.getElementById('auth-avatar-img');
+  const authDefaultIcon = document.getElementById('auth-default-icon');
   const authPopover = document.getElementById('auth-popover');
+  const authPopoverAvatar = document.getElementById('auth-popover-avatar');
+  const authPopoverInitial = document.getElementById('auth-popover-initial');
   const authAccountName = document.getElementById('auth-account-name');
+  const authAccountMeta = document.getElementById('auth-account-meta');
+  const authReauthBanner = document.getElementById('auth-reauth-banner');
+  const authReauthBtn = document.getElementById('auth-reauth-btn');
+  const authAccountsSection = document.getElementById('auth-accounts-section');
+  const authRefreshBtn = document.getElementById('auth-refresh-btn');
+  const authAccountsList = document.getElementById('auth-accounts-list');
+  const authSwitchGoogleBtn = document.getElementById('auth-switch-google-btn');
   const authSignoutBtn = document.getElementById('auth-signout-btn');
   const authCloseBtn = document.getElementById('auth-close-btn');
   const quitBtn = document.getElementById('quit-btn');
@@ -109,6 +120,13 @@
     lastSyncMs: 0,
     loggedIn: false,
     accountName: '',
+    channelHandle: '',
+    email: '',
+    avatarUrl: '',
+    activePageId: '',
+    authUser: '',
+    accounts: [],
+    needsReauth: false,
     toastTimer: null,
     vuStyle: 'led', // 'led' | 'bar'
     popoverTrack: null,
@@ -334,12 +352,128 @@
     drawVuMeter();
   }
 
+  function setAvatarDisplay(imgEl, fallbackEl, url, fallbackName) {
+    if (fallbackEl && fallbackName && fallbackEl.tagName && fallbackEl.tagName.toLowerCase() !== 'svg') {
+      fallbackEl.textContent = fallbackName.trim().charAt(0).toUpperCase() || 'Y';
+    }
+    if (!imgEl) return;
+    if (url) {
+      imgEl.onload = () => {
+        imgEl.classList.remove('hidden');
+        if (fallbackEl) fallbackEl.classList.add('hidden');
+      };
+      imgEl.onerror = () => {
+        imgEl.classList.add('hidden');
+        if (fallbackEl) fallbackEl.classList.remove('hidden');
+      };
+      imgEl.src = url;
+    } else {
+      imgEl.removeAttribute('src');
+      imgEl.classList.add('hidden');
+      if (fallbackEl) fallbackEl.classList.remove('hidden');
+    }
+  }
+
+  function renderAuthAccountsList() {
+    if (!authAccountsList || !authAccountsSection) return;
+    const accounts = Array.isArray(state.accounts) ? state.accounts : [];
+    authAccountsSection.classList.toggle('hidden', accounts.length === 0);
+    authAccountsList.innerHTML = '';
+    if (accounts.length === 0) return;
+
+    const frag = document.createDocumentFragment();
+    accounts.forEach((acc) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      const isSelected = Boolean(acc.selected || (state.activePageId && acc.page_id === state.activePageId));
+      btn.className = 'auth-account-item' + (isSelected ? ' active' : '');
+
+      const avWrap = document.createElement('span');
+      avWrap.className = 'auth-item-avatar';
+      const avInitial = document.createElement('span');
+      avInitial.textContent = (acc.name || 'Y').trim().charAt(0).toUpperCase() || 'Y';
+      const avImg = document.createElement('img');
+      avImg.className = 'hidden';
+      avImg.alt = '';
+      setAvatarDisplay(avImg, avInitial, acc.avatar_url || '', acc.name || 'Y');
+      avWrap.appendChild(avImg);
+      avWrap.appendChild(avInitial);
+
+      const meta = document.createElement('span');
+      meta.className = 'auth-item-meta';
+      const nameEl = document.createElement('span');
+      nameEl.className = 'auth-item-name';
+      nameEl.textContent = acc.name || 'YouTube Channel';
+      const subEl = document.createElement('span');
+      subEl.className = 'auth-item-sub';
+      const subParts = [acc.handle, acc.subscriber_text, acc.email].filter(Boolean);
+      subEl.textContent = subParts.join(' • ') || (acc.page_id ? 'Brand Account' : 'Personal Account');
+      meta.appendChild(nameEl);
+      meta.appendChild(subEl);
+
+      btn.appendChild(avWrap);
+      btn.appendChild(meta);
+
+      if (isSelected) {
+        const chk = document.createElement('span');
+        chk.className = 'auth-item-check';
+        chk.textContent = '✓';
+        btn.appendChild(chk);
+      }
+
+      btn.addEventListener('click', async () => {
+        if (isSelected) return;
+        try {
+          const updated = await window.backendSwitchBrandAccount(acc.page_id || '', acc.auth_user || '');
+          applyAuthUI(updated);
+          showToast(`Switched to ${updated.account_name || acc.name}`);
+        } catch (_) {
+          showToast('Failed to switch channel');
+        }
+      });
+
+      frag.appendChild(btn);
+    });
+    authAccountsList.appendChild(frag);
+  }
+
   function applyAuthUI(auth) {
     state.loggedIn = Boolean(auth && auth.logged_in);
-    state.accountName = (auth && auth.account_name) || 'YouTube Account';
-    authBtn.classList.toggle('signed-in', state.loggedIn);
-    authBtn.title = state.loggedIn ? `Signed in as ${state.accountName}` : 'Sign in with Google';
-    authAccountName.textContent = state.accountName;
+    state.needsReauth = Boolean(auth && auth.needs_reauth);
+    state.accountName = (auth && auth.account_name) || '';
+    state.channelHandle = (auth && auth.channel_handle) || '';
+    state.email = (auth && auth.email) || '';
+    state.avatarUrl = (auth && auth.avatar_url) || '';
+    state.activePageId = (auth && auth.active_page_id) || '';
+    state.authUser = (auth && auth.auth_user) || '';
+    state.accounts = Array.isArray(auth && auth.accounts) ? auth.accounts : [];
+
+    authBtn.classList.toggle('signed-in', state.loggedIn && !state.needsReauth);
+    authBtn.classList.toggle('needs-reauth', state.loggedIn && state.needsReauth);
+
+    const displayName = state.needsReauth && (!state.accountName || state.accountName === 'YouTube Account')
+      ? 'Google Sign-In'
+      : (state.accountName || state.email || 'Google Account');
+
+    const metaParts = [state.channelHandle, state.email].filter(Boolean);
+    const metaText = metaParts.join(' • ') || (state.needsReauth ? 'Session refresh required' : 'Signed in');
+
+    authBtn.title = state.loggedIn
+      ? (state.needsReauth ? 'Refresh YouTube sign-in' : `Signed in as ${displayName}`)
+      : 'Sign in with Google';
+
+    setAvatarDisplay(authAvatarImg, authDefaultIcon, state.loggedIn ? state.avatarUrl : '', displayName);
+    setAvatarDisplay(authPopoverAvatar, authPopoverInitial, state.loggedIn ? state.avatarUrl : '', displayName);
+
+    authAccountName.textContent = displayName;
+    if (authAccountMeta) {
+      authAccountMeta.textContent = metaText;
+    }
+    if (authReauthBanner) {
+      authReauthBanner.classList.toggle('hidden', !state.needsReauth);
+    }
+    renderAuthAccountsList();
+
     if (!state.loggedIn) {
       authPopover.classList.add('hidden');
     }
@@ -1624,10 +1758,16 @@
   }
 
   document.addEventListener('click', (e) => {
-    if (!addPlaylistPopover || addPlaylistPopover.classList.contains('hidden')) return;
-    if (addPlaylistPopover.contains(e.target)) return;
-    if (e.target && typeof e.target.closest === 'function' && e.target.closest('.add-pl-btn')) return;
-    closeAddToPlaylistPopover();
+    if (addPlaylistPopover && !addPlaylistPopover.classList.contains('hidden')) {
+      if (!addPlaylistPopover.contains(e.target) && !(e.target && typeof e.target.closest === 'function' && e.target.closest('.add-pl-btn'))) {
+        closeAddToPlaylistPopover();
+      }
+    }
+    if (authPopover && !authPopover.classList.contains('hidden')) {
+      if (!authPopover.contains(e.target) && !authBtn.contains(e.target)) {
+        authPopover.classList.add('hidden');
+      }
+    }
   });
 
   authBtn.addEventListener('click', async () => {
@@ -1638,6 +1778,35 @@
     showToast('Opening Google sign-in...');
     await window.backendAuthAction('login');
   });
+
+  if (authReauthBtn) {
+    authReauthBtn.addEventListener('click', async () => {
+      authPopover.classList.add('hidden');
+      showToast('Opening Google sign-in...');
+      await window.backendAuthAction('login');
+    });
+  }
+
+  if (authSwitchGoogleBtn) {
+    authSwitchGoogleBtn.addEventListener('click', async () => {
+      authPopover.classList.add('hidden');
+      showToast('Opening Google sign-in...');
+      await window.backendAuthAction('switch_google');
+    });
+  }
+
+  if (authRefreshBtn) {
+    authRefreshBtn.addEventListener('click', async () => {
+      showToast('Syncing channels...');
+      const auth = await window.backendAuthAction('refresh');
+      applyAuthUI(auth);
+      if (auth && auth.accounts && auth.accounts.length > 0) {
+        showToast(`Synced ${auth.accounts.length} channel${auth.accounts.length === 1 ? '' : 's'}`);
+      } else {
+        showToast('Could not sync — try Refresh Sign-In');
+      }
+    });
+  }
 
   authSignoutBtn.addEventListener('click', async () => {
     const auth = await window.backendAuthAction('logout');
@@ -1811,8 +1980,13 @@
 
   // In-window keyboard shortcuts
   document.addEventListener('keydown', async (e) => {
-    if (e.key === 'Escape' && addPlaylistPopover && !addPlaylistPopover.classList.contains('hidden')) {
-      closeAddToPlaylistPopover();
+    if (e.key === 'Escape') {
+      if (addPlaylistPopover && !addPlaylistPopover.classList.contains('hidden')) {
+        closeAddToPlaylistPopover();
+      }
+      if (authPopover && !authPopover.classList.contains('hidden')) {
+        authPopover.classList.add('hidden');
+      }
     }
     const tag = (document.activeElement && document.activeElement.tagName) || '';
     const isInput = tag === 'INPUT' || tag === 'TEXTAREA';

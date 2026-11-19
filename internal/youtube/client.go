@@ -296,15 +296,26 @@ func (c *Client) postInnerTube(ctx context.Context, endpoint string, payload map
 }
 
 func (c *Client) buildContext() map[string]any {
-	return map[string]any{
+	c.mu.Lock()
+	activePageID := c.auth.ActivePageID
+	loggedIn := c.auth.LoggedIn
+	c.mu.Unlock()
+
+	ctx := map[string]any{
 		"client": map[string]any{
-			"clientName":    webClientName,
-			"clientVersion": webClientVersion,
-			"hl":            "en",
-			"gl":            "US",
+			"clientName":       webClientName,
+			"clientVersion":    webClientVersion,
+			"hl":               "en",
+			"gl":               "US",
 			"utcOffsetMinutes": 0,
 		},
 	}
+	if loggedIn && activePageID != "" {
+		ctx["user"] = map[string]any{
+			"onBehalfOfUser": activePageID,
+		}
+	}
+	return ctx
 }
 
 func applyAuthHeaders(req *http.Request, auth config.AuthState, unixTS int64) {
@@ -326,6 +337,14 @@ func applyAuthHeaders(req *http.Request, auth config.AuthState, unixTS int64) {
 		req.Header.Set("Authorization", ComputeSAPISIDHash(sapisid, youtubeOrigin, unixTS))
 		req.Header.Set("X-Origin", youtubeOrigin)
 	}
+	if auth.ActivePageID != "" {
+		req.Header.Set("X-Goog-PageId", auth.ActivePageID)
+	}
+	authUser := auth.AuthUser
+	if authUser == "" {
+		authUser = "0"
+	}
+	req.Header.Set("X-Goog-AuthUser", authUser)
 }
 
 // ComputeSAPISIDHash calculates the YouTube SAPISIDHASH Authorization header value.
@@ -540,7 +559,7 @@ func extractText(v any) string {
 	return ""
 }
 
-func extractThumbnailURL(v any, videoID string) string {
+func extractBestThumbnailURL(v any) string {
 	if m, ok := v.(map[string]any); ok {
 		if list, ok := m["thumbnails"].([]any); ok && len(list) > 0 {
 			for i := len(list) - 1; i >= 0; i-- {
@@ -554,6 +573,13 @@ func extractThumbnailURL(v any, videoID string) string {
 				}
 			}
 		}
+	}
+	return ""
+}
+
+func extractThumbnailURL(v any, videoID string) string {
+	if u := extractBestThumbnailURL(v); u != "" {
+		return u
 	}
 	return fmt.Sprintf("https://i.ytimg.com/vi/%s/hqdefault.jpg", videoID)
 }
