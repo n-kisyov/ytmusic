@@ -73,7 +73,9 @@
 
     <!-- Collapsible Video Viewport (0px default / 214px when enabled) -->
     <section id="video-pane" class="video-pane">
-      <video id="media-player" playsinline preload="metadata"></video>
+      <canvas id="video-canvas" class="video-canvas"></canvas>
+      <video id="video-renderer" class="video-hidden-decoder" muted playsinline preload="none"></video>
+      <audio id="media-player" preload="metadata"></audio>
       <div id="video-loading-overlay" class="video-loading hidden">
         <span class="spinner lg"></span>
       </div>
