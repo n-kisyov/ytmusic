@@ -424,6 +424,10 @@ func hasRequiredSessionCookies(cookies map[string]string) bool {
 
 // ApplyProfileToAuthState merges InnerTube account metadata and Brand Accounts onto an AuthState.
 func ApplyProfileToAuthState(authState *config.AuthState, prof youtube.AccountProfile) {
+	if prof.SessionExpired && prof.AccountName == "" && len(prof.Accounts) == 0 {
+		authState.NeedsReauth = true
+		return
+	}
 	if prof.AccountName != "" {
 		authState.AccountName = prof.AccountName
 	}
@@ -433,7 +437,9 @@ func ApplyProfileToAuthState(authState *config.AuthState, prof youtube.AccountPr
 	if len(prof.Accounts) > 0 {
 		authState.Accounts = prof.Accounts
 		authState.ChannelHandle = prof.ChannelHandle
-		authState.AvatarURL = prof.AvatarURL
+		if prof.AvatarURL != "" {
+			authState.AvatarURL = prof.AvatarURL
+		}
 		authState.ActivePageID = prof.ActivePageID
 	} else {
 		if prof.ChannelHandle != "" {
@@ -449,7 +455,7 @@ func ApplyProfileToAuthState(authState *config.AuthState, prof youtube.AccountPr
 	if prof.AuthUser != "" {
 		authState.AuthUser = prof.AuthUser
 	}
-	authState.NeedsReauth = false
+	authState.NeedsReauth = prof.SessionExpired
 }
 
 // --- COM Helpers for ICoreWebView2_2::GetCookieManager ---
