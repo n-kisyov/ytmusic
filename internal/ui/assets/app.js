@@ -40,6 +40,7 @@
   const trackCounter = document.getElementById('track-counter');
   const vuMeter = document.getElementById('vu-meter');
   const vuCanvas = document.getElementById('vu-canvas');
+  const playtimeStat = document.getElementById('playtime-stat');
 
   const timeElapsed = document.getElementById('time-elapsed');
   const timeTotal = document.getElementById('time-total');
@@ -150,8 +151,74 @@
     searchSuggestTimer: null,
     dragSourceIdx: -1,
     userInitiatedPlay: false,
+    baseTotalPlaySec: 0,
+    sessionPlayMs: 0,
+    playAnchorMs: 0,
+    playtimeTimer: null,
     popoverTrack: null,
   };
+
+  function formatCompactPlayTime(sec) {
+    if (!Number.isFinite(sec) || sec < 0) sec = 0;
+    const total = Math.floor(sec);
+    const hrs = Math.floor(total / 3600);
+    const mins = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    if (hrs > 0) {
+      return `${hrs}h${mins < 10 ? '0' : ''}${mins}m`;
+    }
+    return `${mins}:${secs < 10 ? '0' : ''}${secs}`;
+  }
+
+  function formatFullPlayTime(sec) {
+    if (!Number.isFinite(sec) || sec < 0) sec = 0;
+    const total = Math.floor(sec);
+    const hrs = Math.floor(total / 3600);
+    const mins = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    const pad = (n) => (n < 10 ? '0' + n : '' + n);
+    if (hrs > 0) return `${hrs}h ${pad(mins)}m ${pad(secs)}s`;
+    return `${mins}m ${pad(secs)}s`;
+  }
+
+  function updatePlaytimeUI() {
+    if (!playtimeStat) return;
+    const sessSec = Math.floor(state.sessionPlayMs / 1000);
+    const totalSec = state.baseTotalPlaySec + sessSec;
+    playtimeStat.textContent = `${formatCompactPlayTime(sessSec)} / ${formatCompactPlayTime(totalSec)}`;
+    playtimeStat.title = `Session: ${formatFullPlayTime(sessSec)} • All-time: ${formatFullPlayTime(totalSec)}`;
+  }
+
+  function flushSessionPlayTime() {
+    if (state.playAnchorMs > 0) {
+      const now = performance.now();
+      if (!media.paused && !media.ended && media.readyState >= 2) {
+        state.sessionPlayMs += Math.max(0, Math.min(10000, now - state.playAnchorMs));
+      }
+      state.playAnchorMs = now;
+    }
+  }
+
+  function startPlaytimeTracker() {
+    flushSessionPlayTime();
+    state.playAnchorMs = performance.now();
+    if (!state.playtimeTimer) {
+      state.playtimeTimer = setInterval(() => {
+        flushSessionPlayTime();
+        updatePlaytimeUI();
+      }, 1000);
+    }
+  }
+
+  function stopPlaytimeTracker() {
+    flushSessionPlayTime();
+    state.playAnchorMs = 0;
+    if (state.playtimeTimer) {
+      clearInterval(state.playtimeTimer);
+      state.playtimeTimer = null;
+    }
+    updatePlaytimeUI();
+  }
 
   function copyTrackURL(tr) {
     if (!tr || !tr.id) return;
@@ -1638,6 +1705,7 @@
 
   function pushPlaybackState() {
     if (typeof window.backendUpdatePlaybackState !== 'function') return Promise.resolve();
+    flushSessionPlayTime();
     const pos = Number.isFinite(media.currentTime) ? media.currentTime : 0;
     const playing = !media.paused && !media.ended;
     state.lastSyncMs = Date.now();
@@ -1646,7 +1714,8 @@
       pos,
       playing,
       state.volume,
-      state.muted
+      state.muted,
+      state.sessionPlayMs / 1000
     ).catch(() => {});
   }
 
@@ -2380,10 +2449,12 @@
   });
 
   media.addEventListener('waiting', () => {
+    stopPlaytimeTracker();
     videoLoading.classList.remove('hidden');
   });
 
   media.addEventListener('error', () => {
+    stopPlaytimeTracker();
     videoLoading.classList.add('hidden');
     decayVuMeterToIdle();
     if (!media.getAttribute('src')) return;
@@ -2423,16 +2494,19 @@
     videoLoading.classList.add('hidden');
     updatePlayButtonUI();
     startVuMeterLoop();
+    startPlaytimeTracker();
     pushPlaybackState();
   });
 
   media.addEventListener('pause', () => {
+    stopPlaytimeTracker();
     updatePlayButtonUI();
     decayVuMeterToIdle();
     pushPlaybackState();
   });
 
   media.addEventListener('ended', () => {
+    stopPlaytimeTracker();
     updatePlayButtonUI();
     decayVuMeterToIdle();
     playNext(true);
@@ -2632,6 +2706,8 @@
       state.vuStyle = s.vu_style === 'bar' ? 'bar' : 'led';
       state.eqPreset = ['flat', 'bass', 'vocal', 'bright'].includes(s.eq_preset) ? s.eq_preset : 'flat';
       state.playbackRate = (typeof s.playback_rate === 'number' && s.playback_rate >= 0.5 && s.playback_rate <= 2.0) ? s.playback_rate : 1.0;
+      state.baseTotalPlaySec = (typeof s.total_play_time_sec === 'number' && s.total_play_time_sec > 0) ? Math.floor(s.total_play_time_sec) : 0;
+      updatePlaytimeUI();
 
       if (vuMeter) {
         vuMeter.title = `Stereo VU Meter (${state.vuStyle === 'led' ? 'LED' : 'Bar'}) — Click to switch style`;

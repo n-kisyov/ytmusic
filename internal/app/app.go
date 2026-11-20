@@ -49,19 +49,23 @@ type loadMorePayload struct {
 
 // App coordinates the UI WebView2 window, Win32 shell/tray, YouTube client, and stream proxy.
 type App struct {
-	mu            sync.Mutex
-	state         config.AppState
-	authState     config.AuthState
-	ytClient      *youtube.Client
-	resolver      *player.Resolver
-	server        *player.Server
-	wv            webview2.WebView
-	winCtrl       *win32.Controller
-	authRunning   bool
-	exited        bool
-	sleepMinutes  int
-	sleepDeadline time.Time
-	sleepTimer    *time.Timer
+	mu               sync.Mutex
+	state            config.AppState
+	authState        config.AuthState
+	ytClient         *youtube.Client
+	resolver         *player.Resolver
+	server           *player.Server
+	wv               webview2.WebView
+	winCtrl          *win32.Controller
+	authRunning      bool
+	exited           bool
+	sleepMinutes     int
+	sleepDeadline    time.Time
+	sleepTimer       *time.Timer
+	baseTotalPlaySec int64
+	sessionPlaySec   float64
+	lastTrayPlaySec  int64
+	lastPlaySaveTime time.Time
 }
 
 // New initializes application state, YouTube client, stream resolver, and local UI/stream server.
@@ -93,11 +97,13 @@ func New() (*App, error) {
 	}
 
 	return &App{
-		state:     state,
-		authState: authState,
-		ytClient:  ytClient,
-		resolver:  resolver,
-		server:    server,
+		state:            state,
+		authState:        authState,
+		ytClient:         ytClient,
+		resolver:         resolver,
+		server:           server,
+		baseTotalPlaySec: state.TotalPlayTimeSec,
+		lastTrayPlaySec:  -1,
 	}, nil
 }
 
@@ -952,8 +958,9 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		return err
 	}
 
-	if err := w.Bind("backendUpdatePlaybackState", func(index int, positionSec float64, isPlaying bool, volume float64, muted bool) error {
+	if err := w.Bind("backendUpdatePlaybackState", func(index int, positionSec float64, isPlaying bool, volume float64, muted bool, sessionPlaySec float64) error {
 		a.mu.Lock()
+		stateChanged := a.state.CurrentIndex != index || a.state.WasPlaying != isPlaying || a.state.Volume != volume || a.state.Muted != muted
 		if index >= -1 && index < len(a.state.Playlist) {
 			a.state.CurrentIndex = index
 			if index >= 0 {
@@ -970,10 +977,26 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			a.state.Volume = volume
 		}
 		a.state.Muted = muted
-		snapshot := a.cloneStateLocked()
+		if sessionPlaySec > a.sessionPlaySec {
+			a.sessionPlaySec = sessionPlaySec
+			a.state.TotalPlayTimeSec = a.baseTotalPlaySec + int64(a.sessionPlaySec)
+		}
+		curSessSec := int64(a.sessionPlaySec)
+		if curSessSec != a.lastTrayPlaySec {
+			a.lastTrayPlaySec = curSessSec
+			a.updateTrayTitleLocked()
+		}
+		shouldSave := stateChanged || !isPlaying || time.Since(a.lastPlaySaveTime) >= 3*time.Second
+		var snapshot config.AppState
+		if shouldSave {
+			a.lastPlaySaveTime = time.Now()
+			snapshot = a.cloneStateLocked()
+		}
 		a.mu.Unlock()
 
-		_ = config.SaveAppState(snapshot)
+		if shouldSave {
+			_ = config.SaveAppState(snapshot)
+		}
 		return nil
 	}); err != nil {
 		return err
@@ -1182,13 +1205,35 @@ func (a *App) saveFinalState() {
 	_ = config.SaveAppState(snapshot)
 }
 
+func formatPlayTimeTooltip(sec int64) string {
+	if sec < 0 {
+		sec = 0
+	}
+	h := sec / 3600
+	m := (sec % 3600) / 60
+	s := sec % 60
+	if h > 0 {
+		return fmt.Sprintf("%dh %02dm", h, m)
+	}
+	return fmt.Sprintf("%d:%02d", m, s)
+}
+
 func (a *App) updateTrayTitleLocked() {
 	if a.winCtrl == nil {
 		return
 	}
-	tip := "ytmusic"
+	sessSec := int64(a.sessionPlaySec)
+	totalSec := a.state.TotalPlayTimeSec
+	if totalSec < a.baseTotalPlaySec+sessSec {
+		totalSec = a.baseTotalPlaySec + sessSec
+	}
+	stats := fmt.Sprintf("\nSession: %s | Total: %s", formatPlayTimeTooltip(sessSec), formatPlayTimeTooltip(totalSec))
+	tip := "ytmusic" + stats
 	if a.state.CurrentIndex >= 0 && a.state.CurrentIndex < len(a.state.Playlist) {
-		tip = "ytmusic :: " + a.state.Playlist[a.state.CurrentIndex].Title
+		const prefix = "ytmusic :: "
+		maxTitleUnits := 120 - win32.UTF16Len(prefix) - win32.UTF16Len(stats)
+		title := win32.TruncateTooltip(a.state.Playlist[a.state.CurrentIndex].Title, maxTitleUnits)
+		tip = prefix + title + stats
 	}
 	a.winCtrl.UpdateTrayTooltip(tip)
 }

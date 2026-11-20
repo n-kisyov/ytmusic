@@ -146,6 +146,24 @@ func (c *Controller) initTray() {
 	c.trayAdded = r != 0
 }
 
+// TruncateTooltip limits tip to at most maxUnits UTF-16 code units with an ellipsis.
+func TruncateTooltip(tip string, maxUnits int) string {
+	return truncateTooltip(tip, maxUnits)
+}
+
+// UTF16Len returns the number of UTF-16 code units in s.
+func UTF16Len(s string) int {
+	units := 0
+	for _, r := range s {
+		if r > 0xFFFF {
+			units += 2
+		} else {
+			units++
+		}
+	}
+	return units
+}
+
 func truncateTooltip(tip string, maxUnits int) string {
 	if maxUnits <= 3 || tip == "" {
 		return ""

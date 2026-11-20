@@ -57,6 +57,7 @@ type AppState struct {
 	EQPreset          string          `json:"eq_preset,omitempty"`
 	PlaybackRate      float64         `json:"playback_rate,omitempty"`
 	RecentSearches    []string        `json:"recent_searches,omitempty"`
+	TotalPlayTimeSec  int64           `json:"total_play_time_sec,omitempty"`
 }
 
 // CookieEntry represents a browser cookie captured during Google/YouTube login.
@@ -267,6 +268,9 @@ func normalizeAppState(s *AppState) {
 	}
 	if s.Volume < 0 || s.Volume > 1 {
 		s.Volume = 0.8
+	}
+	if s.TotalPlayTimeSec < 0 {
+		s.TotalPlayTimeSec = 0
 	}
 	if len(s.Playlist) == 0 {
 		s.CurrentIndex = -1
