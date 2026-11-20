@@ -2105,41 +2105,63 @@
     }
 
     if (state.likedTracks.length === 0) return;
-    state.playlist = state.likedTracks.map((t) => ({ ...t }));
-    state.shuffleHistory = [];
-    state.currentIndex = 0;
-    state.activeTab = 'queue';
-    renderActiveDrawerView(true);
-    await window.backendUpdatePlaylist(state.playlist, 0).catch(() => {});
-    await playTrackAt(0, true);
+    try {
+      const res = await window.backendLoadLikedPlaylist();
+      if (!res || !Array.isArray(res.playlist) || res.playlist.length === 0) return;
+      state.playlist = res.playlist;
+      state.shuffleHistory = [];
+      state.currentIndex = 0;
+      state.activeTab = 'queue';
+      searchInput.value = '';
+      renderActiveDrawerView(true);
+      showToast('Playing Liked songs');
+      await playTrackAt(0, true, 0);
+    } catch (_) {
+      showToast('Failed to play Liked songs');
+    }
   });
+
+  if (appendCollectionBtn) {
+    appendCollectionBtn.addEventListener('click', async () => {
+      closeAddToPlaylistPopover();
+      const customName = getSelectedSavedPlaylistName();
+      if (customName) {
+        const sp = findSavedPlaylist(customName);
+        if (sp) await appendTracksToQueue(sp.tracks || [], sp.name);
+        return;
+      }
+      if (state.activeTab === 'liked') {
+        await appendTracksToQueue(state.likedTracks, 'Liked');
+      }
+    });
+  }
 
   saveQueueBtn.addEventListener('click', () => {
     saveQueueBar.classList.toggle('hidden');
     if (!saveQueueBar.classList.contains('hidden')) {
-      if (saveQueueConfirm) {
-        saveQueueConfirm.classList.toggle('hidden', state.playlist.length === 0);
-      }
       const fallback = `Playlist ${state.savedPlaylists.length + 1}`;
       saveQueueInput.value = state.playlist.length > 0 ? (searchInput.value.trim() || fallback) : fallback;
+      updateSaveBarButtonsUI();
       saveQueueInput.focus();
       saveQueueInput.select();
     }
   });
 
+  saveQueueInput.addEventListener('input', updateSaveBarButtonsUI);
+
   saveQueueCancel.addEventListener('click', () => {
     saveQueueBar.classList.add('hidden');
   });
 
-  async function confirmSaveQueue() {
+  async function confirmSaveQueue(mode = 'replace') {
     const name = saveQueueInput.value.trim();
     if (!name || state.playlist.length === 0) return;
     try {
-      const updated = await window.backendSavePlaylist(name);
+      const updated = await window.backendSavePlaylist(name, mode);
       state.savedPlaylists = Array.isArray(updated) ? updated : [];
       saveQueueBar.classList.add('hidden');
       renderActiveDrawerView(false);
-      showToast(`Saved "${name}"`);
+      showToast(mode === 'merge' ? `Merged into "${name}"` : `Saved "${name}"`);
     } catch (err) {
       showToast('Failed to save playlist');
     }
@@ -2167,7 +2189,10 @@
     }
   }
 
-  saveQueueConfirm.addEventListener('click', confirmSaveQueue);
+  saveQueueConfirm.addEventListener('click', () => confirmSaveQueue('replace'));
+  if (saveQueueMerge) {
+    saveQueueMerge.addEventListener('click', () => confirmSaveQueue('merge'));
+  }
   if (saveEmptyConfirm) {
     saveEmptyConfirm.addEventListener('click', confirmCreateEmptyPlaylist);
   }
@@ -2175,7 +2200,8 @@
     if (e.key === 'Enter') {
       e.preventDefault();
       if (state.playlist.length > 0) {
-        confirmSaveQueue();
+        const exists = Boolean(findSavedPlaylist(saveQueueInput.value.trim()));
+        confirmSaveQueue(exists ? 'merge' : 'replace');
       } else {
         confirmCreateEmptyPlaylist();
       }
@@ -2183,6 +2209,15 @@
       saveQueueBar.classList.add('hidden');
     }
   });
+
+  if (addPlaylistCopyBtn) {
+    addPlaylistCopyBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (state.popoverTrack) {
+        copyTrackURL(state.popoverTrack);
+      }
+    });
+  }
 
   if (addPlaylistClose) {
     addPlaylistClose.addEventListener('click', closeAddToPlaylistPopover);
@@ -2208,6 +2243,11 @@
   }
 
   document.addEventListener('click', (e) => {
+    if (searchDropdown && !searchDropdown.classList.contains('hidden')) {
+      if (!searchDropdown.contains(e.target) && !searchForm.contains(e.target)) {
+        closeSearchDropdown();
+      }
+    }
     if (addPlaylistPopover && !addPlaylistPopover.classList.contains('hidden')) {
       if (!addPlaylistPopover.contains(e.target) && !(e.target && typeof e.target.closest === 'function' && e.target.closest('.add-pl-btn'))) {
         closeAddToPlaylistPopover();
@@ -2216,6 +2256,16 @@
     if (authPopover && !authPopover.classList.contains('hidden')) {
       if (!authPopover.contains(e.target) && !authBtn.contains(e.target)) {
         authPopover.classList.add('hidden');
+      }
+    }
+    if (audioPopover && !audioPopover.classList.contains('hidden')) {
+      if (!audioPopover.contains(e.target) && !(eqBtn && eqBtn.contains(e.target))) {
+        audioPopover.classList.add('hidden');
+      }
+    }
+    if (shortcutsPopover && !shortcutsPopover.classList.contains('hidden')) {
+      if (!shortcutsPopover.contains(e.target) && !(shortcutsHelpBtn && shortcutsHelpBtn.contains(e.target))) {
+        shortcutsPopover.classList.add('hidden');
       }
     }
   });
@@ -2296,8 +2346,12 @@
     const tr = state.playlist[state.currentIndex];
     const dur = Number.isFinite(media.duration) && media.duration > 0 ? media.duration : (tr ? tr.duration_sec : 0);
     const pct = parseFloat(progressRange.value) / 1000;
-    if (dur > 0 && Number.isFinite(media.duration)) {
-      media.currentTime = pct * media.duration;
+    if (dur > 0) {
+      if (Number.isFinite(media.duration) && media.duration > 0) {
+        media.currentTime = pct * media.duration;
+      } else {
+        state.pendingSeekSec = pct * dur;
+      }
     }
     state.isSeeking = false;
     pushPlaybackState();
@@ -2313,12 +2367,12 @@
   // Media Element Events
   media.addEventListener('loadedmetadata', () => {
     videoLoading.classList.add('hidden');
+    media.playbackRate = state.playbackRate;
     if (state.pendingSeekSec > 0 && Number.isFinite(media.duration) && state.pendingSeekSec < media.duration) {
       media.currentTime = state.pendingSeekSec;
     }
     state.pendingSeekSec = 0;
     updateNowPlayingHeader();
-    syncVideoRendererSource();
   });
 
   media.addEventListener('canplay', () => {
@@ -2332,12 +2386,16 @@
   media.addEventListener('error', () => {
     videoLoading.classList.add('hidden');
     decayVuMeterToIdle();
-    syncVideoRendererSource();
     if (!media.getAttribute('src')) return;
+    if (!state.userInitiatedPlay) {
+      updatePlayButtonUI();
+      return;
+    }
 
     const seq = state.playbackSeq;
     state.consecutiveErrors++;
     if (state.consecutiveErrors >= 3) {
+      state.userInitiatedPlay = false;
       updatePlayButtonUI();
       showToast('Playback paused: multiple stream errors');
       return;
@@ -2356,52 +2414,29 @@
 
   media.addEventListener('play', () => {
     startVuMeterLoop();
-    syncVideoRendererSource();
   });
 
   media.addEventListener('playing', () => {
     state.consecutiveErrors = 0;
+    state.userInitiatedPlay = true;
     clearErrorSkipTimer();
     videoLoading.classList.add('hidden');
     updatePlayButtonUI();
     startVuMeterLoop();
-    syncVideoRendererSource();
     pushPlaybackState();
   });
 
   media.addEventListener('pause', () => {
     updatePlayButtonUI();
     decayVuMeterToIdle();
-    syncVideoRendererSource();
     pushPlaybackState();
-  });
-
-  media.addEventListener('seeked', () => {
-    syncVideoRendererSource();
   });
 
   media.addEventListener('ended', () => {
     updatePlayButtonUI();
     decayVuMeterToIdle();
-    syncVideoRendererSource();
     playNext(true);
   });
-
-  if (videoRenderer) {
-    videoRenderer.addEventListener('loadedmetadata', () => {
-      if (!state.videoEnabled) return;
-      syncVideoTimeIfDrifted(0.05);
-      if (!media.paused && !media.ended) {
-        videoRenderer.play().catch(() => {});
-      }
-    });
-    videoRenderer.addEventListener('loadeddata', () => {
-      if (state.videoEnabled) renderSingleVideoFrame();
-    });
-    videoRenderer.addEventListener('seeked', () => {
-      if (state.videoEnabled) renderSingleVideoFrame();
-    });
-  }
 
   media.addEventListener('timeupdate', () => {
     if (state.isSeeking) return;
@@ -2431,11 +2466,18 @@
   // In-window keyboard shortcuts
   document.addEventListener('keydown', async (e) => {
     if (e.key === 'Escape') {
+      closeSearchDropdown();
       if (addPlaylistPopover && !addPlaylistPopover.classList.contains('hidden')) {
         closeAddToPlaylistPopover();
       }
       if (authPopover && !authPopover.classList.contains('hidden')) {
         authPopover.classList.add('hidden');
+      }
+      if (audioPopover && !audioPopover.classList.contains('hidden')) {
+        audioPopover.classList.add('hidden');
+      }
+      if (shortcutsPopover && !shortcutsPopover.classList.contains('hidden')) {
+        shortcutsPopover.classList.add('hidden');
       }
     }
     const tag = (document.activeElement && document.activeElement.tagName) || '';
@@ -2511,6 +2553,13 @@
       case 'T':
         await toggleTheme();
         break;
+      case 'e':
+      case 'E':
+        if (eqBtn) eqBtn.click();
+        break;
+      case '?':
+        if (shortcutsPopover) shortcutsPopover.classList.toggle('hidden');
+        break;
     }
   });
 
@@ -2574,12 +2623,19 @@
       state.playlist = Array.isArray(s.playlist) ? s.playlist : [];
       state.likedTracks = Array.isArray(s.liked_tracks) ? s.liked_tracks : [];
       state.savedPlaylists = Array.isArray(s.saved_playlists) ? s.saved_playlists : [];
+      state.recentSearches = Array.isArray(s.recent_searches) ? s.recent_searches : [];
       state.currentIndex = typeof s.current_index === 'number' ? s.current_index : -1;
       state.volume = typeof s.volume === 'number' ? s.volume : 0.8;
       state.muted = Boolean(s.muted);
       state.shuffle = Boolean(s.shuffle);
       state.repeatMode = s.repeat_mode || 'off';
+      state.vuStyle = s.vu_style === 'bar' ? 'bar' : 'led';
+      state.eqPreset = ['flat', 'bass', 'vocal', 'bright'].includes(s.eq_preset) ? s.eq_preset : 'flat';
+      state.playbackRate = (typeof s.playback_rate === 'number' && s.playback_rate >= 0.5 && s.playback_rate <= 2.0) ? s.playback_rate : 1.0;
 
+      if (vuMeter) {
+        vuMeter.title = `Stereo VU Meter (${state.vuStyle === 'led' ? 'LED' : 'Bar'}) — Click to switch style`;
+      }
       searchInput.value = s.search_query || '';
       applyVideoModeUI(Boolean(s.video_enabled));
       applyPlaylistModeUI(Boolean(s.playlist_expanded));
@@ -2587,14 +2643,16 @@
       applyThemeUI(s.theme || 'dark');
       updateModesUI();
       updateVolumeUI();
+      updateAudioSettingsUI();
       applyAuthUI(init.auth || {});
       renderActiveDrawerView(true);
 
       if (state.currentIndex >= 0 && state.currentIndex < state.playlist.length && init.stream_url) {
         state.pendingSeekSec = s.position_sec || 0;
+        state.userInitiatedPlay = Boolean(s.was_playing);
         media.src = init.stream_url;
+        media.playbackRate = state.playbackRate;
         media.load();
-        syncVideoRendererSource();
         if (s.was_playing) {
           media.play().catch(() => updatePlayButtonUI());
         } else {
