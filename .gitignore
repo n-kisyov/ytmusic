@@ -23,3 +23,8 @@ go.work.sum
 
 # env file
 .env
+
+# Screenshot scripts and temporary capture artifacts (keep actual screenshots/*.png tracked)
+capture-screenshots.ps1
+scripts/
+.screenshot_tmp/
