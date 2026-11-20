@@ -651,6 +651,13 @@ func (a *App) bindMethods(w webview2.WebView) error {
 	if err := w.Bind("backendUpdatePlaylist", func(playlist []config.Track, currentIndex int) error {
 		a.mu.Lock()
 		a.state.Playlist = append([]config.Track(nil), playlist...)
+		if len(a.state.Playlist) == 0 {
+			a.ytClient.ClearOverflow()
+			a.state.Overflow = nil
+			a.state.ContinuationToken = ""
+			a.state.PositionSec = 0
+			a.state.WasPlaying = false
+		}
 		if currentIndex >= 0 && currentIndex < len(a.state.Playlist) {
 			a.state.CurrentIndex = currentIndex
 			a.state.CurrentTrackID = a.state.Playlist[currentIndex].ID

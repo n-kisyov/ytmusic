@@ -18,11 +18,11 @@
         <input
           id="search-input"
           type="text"
-          placeholder="Search"
+          placeholder="Search or paste YouTube URL..."
           autocomplete="off"
           spellcheck="false"
         />
-        <button id="search-btn" type="submit" class="search-submit" title="Search YouTube (builds 30-song list)">
+        <button id="search-btn" type="submit" class="search-submit" title="Search YouTube or load URL/playlist">
           <svg id="search-btn-icon" class="search-btn-svg" viewBox="0 0 24 24" aria-hidden="true">
             <path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.47 6.47 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>
           </svg>
@@ -60,6 +60,9 @@
       </button>
     </header>
 
+    <!-- Search Suggestions & Recent History Dropdown -->
+    <div id="search-dropdown" class="search-dropdown hidden"></div>
+
     <!-- Account Popover (when signed in) -->
     <div id="auth-popover" class="auth-popover hidden">
       <div class="auth-popover-header">
@@ -92,9 +95,7 @@
 
     <!-- Collapsible Video Viewport (0px default / 214px when enabled) -->
     <section id="video-pane" class="video-pane">
-      <canvas id="video-canvas" class="video-canvas"></canvas>
-      <video id="video-renderer" class="video-hidden-decoder" muted playsinline preload="none"></video>
-      <audio id="media-player" preload="metadata"></audio>
+      <video id="media-player" class="media-player-video" playsinline preload="metadata"></video>
       <div id="video-loading-overlay" class="video-loading hidden">
         <span class="spinner lg"></span>
       </div>
@@ -118,13 +119,13 @@
             <span>L</span>
             <span>R</span>
           </div>
-          <canvas id="vu-canvas" class="vu-canvas" width="44" height="16"></canvas>
+          <canvas id="vu-canvas" class="vu-canvas" width="44" height="14"></canvas>
         </div>
         <button id="like-btn" type="button" class="ctrl-btn sm like-btn" title="Like / Unlike song" aria-label="Like song">
           <svg id="heart-outline-icon" viewBox="0 0 24 24"><path fill="currentColor" d="M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3zm-4.4 15.55l-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05z"/></svg>
           <svg id="heart-filled-icon" class="hidden" viewBox="0 0 24 24"><path fill="currentColor" d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
         </button>
-        <div id="track-counter" class="track-counter">0/0</div>
+        <button id="track-counter" type="button" class="track-counter" title="Scroll to active track">0/0</button>
       </div>
 
       <!-- Seekable Progress Bar -->
@@ -169,6 +170,9 @@
         </div>
 
         <div class="mode-toggles">
+          <button id="eq-btn" type="button" class="toggle-pill eq-pill" title="Audio EQ, Speed &amp; Sleep Timer (E)">
+            <span id="eq-btn-label">EQ</span>
+          </button>
           <button id="video-toggle-btn" type="button" class="toggle-pill" title="Toggle video playback (V)">
             <svg viewBox="0 0 24 24"><path fill="currentColor" d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"/></svg>
             <span>Video</span>
@@ -180,6 +184,71 @@
         </div>
       </div>
     </section>
+
+    <!-- Audio EQ, Speed & Sleep Timer Popover -->
+    <div id="audio-popover" class="audio-popover hidden">
+      <div class="audio-pop-header">
+        <span class="add-playlist-label">Audio &amp; Playback</span>
+        <div class="audio-pop-header-acts">
+          <button id="shortcuts-help-btn" type="button" class="row-act-btn" title="Keyboard shortcuts (?)">?</button>
+          <button id="audio-pop-close" type="button" class="row-act-btn" title="Close">×</button>
+        </div>
+      </div>
+      <div class="audio-pop-group">
+        <span class="audio-pop-sub">EQ Preset</span>
+        <div id="eq-preset-group" class="audio-chip-row">
+          <button type="button" class="pill-btn eq-opt" data-eq="flat">Flat</button>
+          <button type="button" class="pill-btn eq-opt" data-eq="bass">Bass</button>
+          <button type="button" class="pill-btn eq-opt" data-eq="vocal">Vocal</button>
+          <button type="button" class="pill-btn eq-opt" data-eq="bright">Bright</button>
+        </div>
+      </div>
+      <div class="audio-pop-group">
+        <span class="audio-pop-sub">Speed</span>
+        <div id="speed-group" class="audio-chip-row">
+          <button type="button" class="pill-btn speed-opt" data-rate="0.75">0.75×</button>
+          <button type="button" class="pill-btn speed-opt" data-rate="1">1×</button>
+          <button type="button" class="pill-btn speed-opt" data-rate="1.25">1.25×</button>
+          <button type="button" class="pill-btn speed-opt" data-rate="1.5">1.5×</button>
+        </div>
+      </div>
+      <div class="audio-pop-group">
+        <div class="audio-pop-sub-row">
+          <span class="audio-pop-sub">Sleep Timer</span>
+          <span id="sleep-countdown-label" class="sleep-countdown">Off</span>
+        </div>
+        <div id="sleep-group" class="audio-chip-row">
+          <button type="button" class="pill-btn sleep-opt" data-mins="0">Off</button>
+          <button type="button" class="pill-btn sleep-opt" data-mins="15">15m</button>
+          <button type="button" class="pill-btn sleep-opt" data-mins="30">30m</button>
+          <button type="button" class="pill-btn sleep-opt" data-mins="60">60m</button>
+        </div>
+      </div>
+      <div class="audio-pop-footer">
+        <button id="cur-copy-link-btn" type="button" class="pill-btn" title="Copy YouTube link for current song">Copy Link</button>
+        <button id="cur-radio-btn" type="button" class="pill-btn" title="Start 30-song Radio Mix from current song">Start Radio</button>
+      </div>
+    </div>
+
+    <!-- Keyboard Shortcuts Popover -->
+    <div id="shortcuts-popover" class="shortcuts-popover hidden">
+      <div class="audio-pop-header">
+        <span class="add-playlist-label">Keyboard Shortcuts</span>
+        <button id="shortcuts-close-btn" type="button" class="row-act-btn" title="Close">×</button>
+      </div>
+      <div class="shortcuts-grid">
+        <span><kbd>Space</kbd> Play / Pause</span>
+        <span><kbd>←</kbd><kbd>→</kbd> Seek ±5s</span>
+        <span><kbd>↑</kbd><kbd>↓</kbd> Volume ±5%</span>
+        <span><kbd>M</kbd> Mute</span>
+        <span><kbd>S</kbd> Shuffle</span>
+        <span><kbd>R</kbd> Repeat</span>
+        <span><kbd>V</kbd> Video Mode</span>
+        <span><kbd>L</kbd> List Drawer</span>
+        <span><kbd>T</kbd> Theme</span>
+        <span><kbd>E</kbd> Audio &amp; EQ</span>
+      </div>
+    </div>
 
     <!-- Collapsible Playlist Drawer (0px hidden / remaining height when expanded) -->
     <section id="playlist-drawer" class="playlist-drawer">
@@ -196,11 +265,13 @@
         <div id="save-queue-bar" class="save-queue-bar hidden">
           <input id="save-queue-input" type="text" placeholder="Playlist name..." autocomplete="off" spellcheck="false" />
           <button id="save-queue-confirm" type="button" class="pill-btn accent" title="Save all songs in current queue">Save Queue</button>
+          <button id="save-queue-merge" type="button" class="pill-btn accent hidden" title="Merge current queue songs into existing playlist">Merge</button>
           <button id="save-empty-confirm" type="button" class="pill-btn" title="Create a new empty playlist">New Empty</button>
           <button id="save-queue-cancel" type="button" class="pill-btn">Cancel</button>
         </div>
         <div id="filter-row" class="filter-row">
           <input id="playlist-filter" type="text" placeholder="Filter tracks..." autocomplete="off" spellcheck="false" />
+          <button id="append-collection-btn" type="button" class="pill-btn hidden" title="Append tracks to current queue">+ Queue</button>
           <button id="play-liked-btn" type="button" class="pill-btn accent hidden">Play All</button>
         </div>
       </div>
@@ -221,7 +292,10 @@
     <div id="add-playlist-popover" class="add-playlist-popover hidden">
       <div class="add-playlist-header">
         <span class="add-playlist-label">Add to playlist</span>
-        <button id="add-playlist-close" type="button" class="row-act-btn" title="Close">×</button>
+        <div class="audio-pop-header-acts">
+          <button id="add-playlist-copy-btn" type="button" class="row-act-btn" title="Copy YouTube link">🔗</button>
+          <button id="add-playlist-close" type="button" class="row-act-btn" title="Close">×</button>
+        </div>
       </div>
       <div id="add-playlist-track" class="add-playlist-track"></div>
       <div id="add-playlist-list" class="add-playlist-list"></div>
