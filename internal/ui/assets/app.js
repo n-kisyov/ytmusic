@@ -1436,12 +1436,12 @@
 
     if (state.playlist.length === 0) {
       state.currentIndex = -1;
+      state.userInitiatedPlay = false;
       clearErrorSkipTimer();
       videoLoading.classList.add('hidden');
       media.pause();
       media.removeAttribute('src');
       media.load();
-      syncVideoRendererSource();
       updatePlayButtonUI();
       renderActiveDrawerView(false);
       await window.backendUpdatePlaylist([], -1).catch(() => {});
@@ -1463,6 +1463,27 @@
     await window.backendUpdatePlaylist(state.playlist, state.currentIndex).catch(() => {});
   }
 
+  async function appendTracksToQueue(tracks, sourceLabel) {
+    if (!Array.isArray(tracks) || tracks.length === 0) return;
+    const existing = new Set(state.playlist.map((t) => t.id));
+    const uniqueNew = tracks.filter((t) => t && t.id && !existing.has(t.id));
+    if (uniqueNew.length === 0) {
+      showToast('All songs are already in Queue');
+      return;
+    }
+    const wasEmpty = state.playlist.length === 0;
+    state.playlist.push(...uniqueNew.map((t) => ({ ...t })));
+    if (wasEmpty) {
+      state.currentIndex = 0;
+    }
+    renderActiveDrawerView(false);
+    await window.backendUpdatePlaylist(state.playlist, state.currentIndex).catch(() => {});
+    showToast(`Added ${uniqueNew.length} song${uniqueNew.length === 1 ? '' : 's'} to Queue` + (sourceLabel ? ` from "${sourceLabel}"` : ''));
+    if (wasEmpty) {
+      await playTrackAt(0, true, 0);
+    }
+  }
+
   async function playTrackFromCollection(tr) {
     let idx = state.playlist.findIndex((item) => item.id === tr.id);
     if (idx < 0) {
@@ -1481,6 +1502,7 @@
     const seq = ++state.playbackSeq;
     state.currentIndex = index;
     state.pendingSeekSec = startPosSec;
+    state.userInitiatedPlay = autoplay;
     updateActiveRowHighlight();
     updateNowPlayingHeader();
 
@@ -1493,8 +1515,8 @@
         return;
       }
       media.src = streamURL;
+      media.playbackRate = state.playbackRate;
       media.load();
-      syncVideoRendererSource();
       if (autoplay) {
         media.play().catch(() => {
           updatePlayButtonUI();
@@ -1517,8 +1539,10 @@
     }
     if (!media.src) return;
     if (media.paused) {
+      state.userInitiatedPlay = true;
       media.play().catch(() => {});
     } else {
+      state.userInitiatedPlay = false;
       media.pause();
     }
   }
@@ -1669,12 +1693,75 @@
     } catch (_) {}
   }
 
-  // --- Event Listeners ---
-  searchForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const q = searchInput.value.trim();
-    if (!q || state.isSearching) return;
+  // --- Search Dropdown (Recent Searches + Live Autocomplete) ---
+  function closeSearchDropdown() {
+    if (searchDropdown) {
+      searchDropdown.classList.add('hidden');
+    }
+  }
 
+  function renderSearchDropdown(suggestions = []) {
+    if (!searchDropdown) return;
+    const typed = searchInput.value.trim().toLowerCase();
+    const matchingRecent = state.recentSearches.filter((q) => !typed || q.toLowerCase().includes(typed));
+    const filteredSuggest = suggestions.filter(
+      (s) => !matchingRecent.some((r) => r.toLowerCase() === s.toLowerCase())
+    );
+
+    if (matchingRecent.length === 0 && filteredSuggest.length === 0) {
+      closeSearchDropdown();
+      return;
+    }
+
+    searchDropdown.innerHTML = '';
+    const frag = document.createDocumentFragment();
+
+    const makeSuggestRow = (text, isRecent) => {
+      const row = document.createElement('div');
+      row.className = 'search-suggest-row';
+      const badge = document.createElement('span');
+      badge.className = 'search-suggest-badge';
+      badge.textContent = isRecent ? '🕒' : '🔍';
+      const label = document.createElement('span');
+      label.className = 'search-suggest-text';
+      label.textContent = text;
+      row.appendChild(badge);
+      row.appendChild(label);
+
+      if (isRecent) {
+        const del = document.createElement('button');
+        del.type = 'button';
+        del.className = 'search-suggest-del';
+        del.title = 'Remove from recent searches';
+        del.textContent = '×';
+        del.addEventListener('click', async (ev) => {
+          ev.stopPropagation();
+          try {
+            const next = await window.backendRemoveRecentSearch(text);
+            state.recentSearches = Array.isArray(next) ? next : [];
+            renderSearchDropdown(suggestions);
+          } catch (_) {}
+        });
+        row.appendChild(del);
+      }
+
+      row.addEventListener('click', () => {
+        searchInput.value = text;
+        closeSearchDropdown();
+        runSearchQuery(text);
+      });
+      return row;
+    };
+
+    matchingRecent.slice(0, 5).forEach((q) => frag.appendChild(makeSuggestRow(q, true)));
+    filteredSuggest.slice(0, 6).forEach((s) => frag.appendChild(makeSuggestRow(s, false)));
+    searchDropdown.appendChild(frag);
+    searchDropdown.classList.remove('hidden');
+  }
+
+  async function runSearchQuery(q) {
+    if (!q || state.isSearching) return;
+    closeSearchDropdown();
     state.isSearching = true;
     clearErrorSkipTimer();
     searchBtnIcon.classList.add('hidden');
@@ -1686,6 +1773,9 @@
         return;
       }
       state.playlist = res.playlist;
+      if (Array.isArray(res.recent_searches)) {
+        state.recentSearches = res.recent_searches;
+      }
       state.shuffleHistory = [];
       state.consecutiveErrors = 0;
       state.currentIndex = 0;
@@ -1693,7 +1783,7 @@
       state.filterQuery = '';
       playlistFilter.value = '';
       renderActiveDrawerView(true);
-      showToast(`Built ${state.playlist.length}-song playlist`);
+      showToast(res.label || `Built ${state.playlist.length}-song playlist`);
       await playTrackAt(0, true, 0);
     } catch (err) {
       showToast('Search failed: ' + (err || 'network error'));
@@ -1702,7 +1792,47 @@
       searchBtnIcon.classList.remove('hidden');
       searchSpinner.classList.add('hidden');
     }
+  }
+
+  searchForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    await runSearchQuery(searchInput.value.trim());
   });
+
+  searchInput.addEventListener('focus', () => {
+    renderSearchDropdown([]);
+  });
+
+  searchInput.addEventListener('input', () => {
+    const q = searchInput.value.trim();
+    if (state.searchSuggestTimer) {
+      clearTimeout(state.searchSuggestTimer);
+      state.searchSuggestTimer = null;
+    }
+    if (!q) {
+      renderSearchDropdown([]);
+      return;
+    }
+    renderSearchDropdown([]);
+    state.searchSuggestTimer = setTimeout(async () => {
+      try {
+        const list = await window.backendSearchSuggest(q);
+        if (document.activeElement === searchInput && searchInput.value.trim() === q) {
+          renderSearchDropdown(Array.isArray(list) ? list : []);
+        }
+      } catch (_) {}
+    }, 200);
+  });
+
+  if (trackCounter) {
+    trackCounter.addEventListener('click', () => {
+      if (state.currentIndex < 0 || state.playlist.length === 0) return;
+      state.activeTab = 'queue';
+      state.filterQuery = '';
+      playlistFilter.value = '';
+      renderActiveDrawerView(true);
+    });
+  }
 
   likeBtn.addEventListener('click', async () => {
     if (state.currentIndex < 0 || state.currentIndex >= state.playlist.length) return;
@@ -1752,12 +1882,170 @@
 
   themeBtn.addEventListener('click', toggleTheme);
 
+  // --- Audio Popover (EQ, Speed, Sleep Timer, VU Persistence & Shortcuts) ---
+  function updateAudioSettingsUI() {
+    applyEQPresetGains();
+    media.playbackRate = state.playbackRate;
+
+    document.querySelectorAll('.eq-opt').forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.eq === state.eqPreset);
+    });
+    document.querySelectorAll('.speed-opt').forEach((btn) => {
+      btn.classList.toggle('active', parseFloat(btn.dataset.rate) === state.playbackRate);
+    });
+
+    if (eqBtnLabel && eqBtn) {
+      const sleepRemMs = state.sleepEndMs > Date.now() ? state.sleepEndMs - Date.now() : 0;
+      if (sleepRemMs > 0) {
+        const mins = Math.max(1, Math.ceil(sleepRemMs / 60000));
+        eqBtnLabel.textContent = `🌙${mins}m`;
+      } else if (state.playbackRate !== 1) {
+        eqBtnLabel.textContent = `${state.playbackRate}×`;
+      } else if (state.eqPreset !== 'flat') {
+        eqBtnLabel.textContent = state.eqPreset.charAt(0).toUpperCase() + state.eqPreset.slice(1);
+      } else {
+        eqBtnLabel.textContent = 'EQ';
+      }
+      eqBtn.classList.toggle('active', sleepRemMs > 0 || state.eqPreset !== 'flat' || state.playbackRate !== 1);
+    }
+  }
+
+  function updateSleepCountdownUI() {
+    const remMs = state.sleepEndMs > Date.now() ? state.sleepEndMs - Date.now() : 0;
+    if (sleepCountdownLabel) {
+      if (remMs <= 0) {
+        sleepCountdownLabel.textContent = 'Off';
+      } else {
+        const totalSec = Math.ceil(remMs / 1000);
+        const m = Math.floor(totalSec / 60);
+        const s = totalSec % 60;
+        sleepCountdownLabel.textContent = `${m}:${s < 10 ? '0' : ''}${s}`;
+      }
+    }
+    const activeMins = state.sleepEndMs > Date.now() ? Math.ceil((state.sleepEndMs - Date.now()) / 60000) : 0;
+    document.querySelectorAll('.sleep-opt').forEach((btn) => {
+      const m = parseInt(btn.dataset.mins || '0', 10);
+      btn.classList.toggle('active', m === 0 ? activeMins === 0 : (activeMins > 0 && Math.abs(activeMins - m) <= 15 && btn === Array.from(document.querySelectorAll('.sleep-opt')).find((b) => parseInt(b.dataset.mins || '0', 10) >= activeMins)));
+    });
+    updateAudioSettingsUI();
+  }
+
+  window.__onSleepTimerChanged = (remainingSec) => {
+    if (state.sleepTickTimer) {
+      clearInterval(state.sleepTickTimer);
+      state.sleepTickTimer = null;
+    }
+    if (remainingSec > 0) {
+      state.sleepEndMs = Date.now() + remainingSec * 1000;
+      state.sleepTickTimer = setInterval(() => {
+        if (Date.now() >= state.sleepEndMs) {
+          state.sleepEndMs = 0;
+          clearInterval(state.sleepTickTimer);
+          state.sleepTickTimer = null;
+        }
+        updateSleepCountdownUI();
+      }, 1000);
+    } else {
+      state.sleepEndMs = 0;
+    }
+    updateSleepCountdownUI();
+  };
+
+  function persistAudioPrefs() {
+    if (typeof window.backendSetAudioPrefs === 'function') {
+      window.backendSetAudioPrefs(state.vuStyle, state.eqPreset, state.playbackRate).catch(() => {});
+    }
+  }
+
   if (vuMeter) {
     vuMeter.addEventListener('click', () => {
       state.vuStyle = state.vuStyle === 'led' ? 'bar' : 'led';
       vuMeter.title = `Stereo VU Meter (${state.vuStyle === 'led' ? 'LED' : 'Bar'}) — Click to switch style`;
       drawVuMeter();
+      persistAudioPrefs();
     });
+  }
+
+  if (eqBtn && audioPopover) {
+    eqBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const opening = audioPopover.classList.contains('hidden');
+      if (opening) {
+        closeAddToPlaylistPopover();
+        closeSearchDropdown();
+        if (authPopover) authPopover.classList.add('hidden');
+        if (shortcutsPopover) shortcutsPopover.classList.add('hidden');
+        const btnRect = eqBtn.getBoundingClientRect();
+        audioPopover.style.top = `${Math.round(btnRect.bottom + 6)}px`;
+        audioPopover.classList.remove('hidden');
+        updateSleepCountdownUI();
+      } else {
+        audioPopover.classList.add('hidden');
+      }
+    });
+  }
+
+  if (audioPopClose && audioPopover) {
+    audioPopClose.addEventListener('click', () => audioPopover.classList.add('hidden'));
+  }
+
+  document.querySelectorAll('.eq-opt').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      state.eqPreset = btn.dataset.eq || 'flat';
+      updateAudioSettingsUI();
+      persistAudioPrefs();
+      showToast(`EQ: ${btn.textContent}`);
+    });
+  });
+
+  document.querySelectorAll('.speed-opt').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const rate = parseFloat(btn.dataset.rate || '1');
+      if (rate >= 0.5 && rate <= 2.0) {
+        state.playbackRate = rate;
+        updateAudioSettingsUI();
+        persistAudioPrefs();
+        showToast(`Speed: ${rate}×`);
+      }
+    });
+  });
+
+  document.querySelectorAll('.sleep-opt').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const mins = parseInt(btn.dataset.mins || '0', 10);
+      if (typeof window.backendSetSleepTimer === 'function') {
+        await window.backendSetSleepTimer(mins).catch(() => {});
+      }
+    });
+  });
+
+  if (curCopyLinkBtn) {
+    curCopyLinkBtn.addEventListener('click', () => {
+      const tr = state.currentIndex >= 0 ? state.playlist[state.currentIndex] : null;
+      if (tr) copyTrackURL(tr);
+      else showToast('No active song');
+    });
+  }
+
+  if (curRadioBtn) {
+    curRadioBtn.addEventListener('click', async () => {
+      const tr = state.currentIndex >= 0 ? state.playlist[state.currentIndex] : null;
+      if (audioPopover) audioPopover.classList.add('hidden');
+      if (tr) await startTrackRadio(tr);
+      else showToast('No active song');
+    });
+  }
+
+  if (shortcutsHelpBtn && shortcutsPopover) {
+    shortcutsHelpBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (audioPopover) audioPopover.classList.add('hidden');
+      shortcutsPopover.classList.toggle('hidden');
+    });
+  }
+
+  if (shortcutsCloseBtn && shortcutsPopover) {
+    shortcutsCloseBtn.addEventListener('click', () => shortcutsPopover.classList.add('hidden'));
   }
 
   document.addEventListener('pointerdown', unlockAudioContextOnGesture);
