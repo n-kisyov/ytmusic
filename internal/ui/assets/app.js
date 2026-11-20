@@ -1046,7 +1046,7 @@
   }
 
   function createQueueRow(tr, idx) {
-    return buildTrackRow({
+    const row = buildTrackRow({
       tr,
       displayIndex: idx,
       active: idx === state.currentIndex,
@@ -1054,11 +1054,14 @@
       buttons: [
         makeLikeRowButton(tr),
         makeAddPlaylistRowButton(tr),
+        makeRadioRowButton(tr),
         makeActionButton('row-act-btn', 'Play next', '⤵', () => moveTrackPlayNext(idx)),
         makeActionButton('row-act-btn danger', 'Remove from queue', '×', () => removeTrackFromQueue(idx)),
       ],
       onRowClick: () => playTrackAt(idx, true),
     });
+    attachRowDragHandlers(row, idx, moveQueueTrackTo);
+    return row;
   }
 
   function createLikedRow(tr, idx) {
@@ -1068,6 +1071,7 @@
       active: isTrackCurrentlyPlaying(tr),
       buttons: [
         makeAddPlaylistRowButton(tr),
+        makeRadioRowButton(tr),
         makeActionButton('row-act-btn liked', 'Remove from Liked', '♥', () => toggleTrackLike(tr)),
       ],
       onRowClick: () => playTrackFromCollection(tr),
@@ -1075,17 +1079,79 @@
   }
 
   function createCustomPlaylistRow(playlistName, tr, idx) {
-    return buildTrackRow({
+    const row = buildTrackRow({
       tr,
       displayIndex: idx,
       active: isTrackCurrentlyPlaying(tr),
       buttons: [
         makeLikeRowButton(tr),
         makeAddPlaylistRowButton(tr),
+        makeRadioRowButton(tr),
         makeActionButton('row-act-btn danger', `Remove from "${playlistName}"`, '×', () => removeTrackFromSavedPlaylist(playlistName, tr)),
       ],
       onRowClick: () => playTrackFromCollection(tr),
     });
+    attachRowDragHandlers(row, idx, (from, to) => moveCustomPlaylistTrack(playlistName, from, to));
+    return row;
+  }
+
+  async function moveQueueTrackTo(fromIdx, toIdx) {
+    if (fromIdx < 0 || fromIdx >= state.playlist.length || toIdx < 0 || toIdx >= state.playlist.length || fromIdx === toIdx) return;
+    const [moved] = state.playlist.splice(fromIdx, 1);
+    state.playlist.splice(toIdx, 0, moved);
+    if (state.currentIndex === fromIdx) {
+      state.currentIndex = toIdx;
+    } else if (fromIdx < state.currentIndex && toIdx >= state.currentIndex) {
+      state.currentIndex--;
+    } else if (fromIdx > state.currentIndex && toIdx <= state.currentIndex) {
+      state.currentIndex++;
+    }
+    state.shuffleHistory = [];
+    renderActiveDrawerView(false);
+    await window.backendUpdatePlaylist(state.playlist, state.currentIndex).catch(() => {});
+  }
+
+  async function moveCustomPlaylistTrack(playlistName, fromIdx, toIdx) {
+    try {
+      const updated = await window.backendMovePlaylistTrack(playlistName, fromIdx, toIdx);
+      state.savedPlaylists = Array.isArray(updated) ? updated : [];
+      renderActiveDrawerView(false);
+    } catch (_) {
+      showToast('Failed to reorder playlist');
+    }
+  }
+
+  async function startTrackRadio(tr) {
+    if (!tr || !tr.id || state.isSearching) return;
+    state.isSearching = true;
+    clearErrorSkipTimer();
+    searchBtnIcon.classList.add('hidden');
+    searchSpinner.classList.remove('hidden');
+    closeAddToPlaylistPopover();
+    try {
+      const res = await window.backendStartRadio(tr);
+      if (!res || !Array.isArray(res.playlist) || res.playlist.length === 0) {
+        showToast('Could not build Radio Mix');
+        return;
+      }
+      state.playlist = res.playlist;
+      state.shuffleHistory = [];
+      state.consecutiveErrors = 0;
+      state.currentIndex = 0;
+      state.activeTab = 'queue';
+      state.filterQuery = '';
+      playlistFilter.value = '';
+      searchInput.value = `Mix: ${tr.title || ''}`.trim();
+      renderActiveDrawerView(true);
+      showToast(res.label || `Radio Mix (${res.playlist.length} songs)`);
+      await playTrackAt(0, true, 0);
+    } catch (_) {
+      showToast('Failed to start Radio Mix');
+    } finally {
+      state.isSearching = false;
+      searchBtnIcon.classList.remove('hidden');
+      searchSpinner.classList.add('hidden');
+    }
   }
 
   function renderSavedPlaylists() {
@@ -1110,6 +1176,51 @@
       meta.appendChild(name);
       meta.appendChild(sub);
 
+      const acts = document.createElement('div');
+      acts.className = 'saved-playlist-actions';
+
+      const appendBtn = makeActionButton('row-act-btn', 'Append to queue', '+Q', async () => {
+        await appendTracksToQueue(sp.tracks || [], sp.name);
+      });
+
+      const renameBtn = makeActionButton('row-act-btn', 'Rename playlist', '✎', () => {
+        const inp = document.createElement('input');
+        inp.type = 'text';
+        inp.className = 'saved-rename-input';
+        inp.value = sp.name;
+        let finished = false;
+        const finishRename = async (commit) => {
+          if (finished) return;
+          finished = true;
+          const nextName = inp.value.trim();
+          if (commit && nextName && nextName !== sp.name) {
+            try {
+              const updated = await window.backendRenamePlaylist(sp.name, nextName);
+              state.savedPlaylists = Array.isArray(updated) ? updated : [];
+              showToast(`Renamed to "${nextName}"`);
+            } catch (_) {
+              showToast('Name already exists or invalid');
+            }
+          }
+          renderActiveDrawerView(false);
+        };
+        inp.addEventListener('click', (ev) => ev.stopPropagation());
+        inp.addEventListener('keydown', (ev) => {
+          ev.stopPropagation();
+          if (ev.key === 'Enter') {
+            ev.preventDefault();
+            finishRename(true);
+          } else if (ev.key === 'Escape') {
+            ev.preventDefault();
+            finishRename(false);
+          }
+        });
+        inp.addEventListener('blur', () => finishRename(true));
+        name.replaceWith(inp);
+        inp.focus();
+        inp.select();
+      });
+
       const delBtn = document.createElement('button');
       delBtn.type = 'button';
       delBtn.className = 'row-act-btn danger';
@@ -1125,8 +1236,12 @@
         } catch (_) {}
       });
 
+      acts.appendChild(appendBtn);
+      acts.appendChild(renameBtn);
+      acts.appendChild(delBtn);
+
       card.appendChild(meta);
-      card.appendChild(delBtn);
+      card.appendChild(acts);
 
       card.addEventListener('click', async () => {
         try {
