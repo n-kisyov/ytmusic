@@ -716,6 +716,21 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			return 0
 		}
 
+	case wmDpiChanged:
+		if lParam != 0 {
+			suggested := (*rect)(unsafe.Pointer(lParam))
+			w := suggested.Right - suggested.Left
+			h := suggested.Bottom - suggested.Top
+			if w > 80 && h > 80 {
+				procSetWindowPos.Call(hwnd, 0, uintptr(suggested.Left), uintptr(suggested.Top), uintptr(w), uintptr(h), swpNoZOrder|swpNoActivate)
+				c.savedRect = *suggested
+				if c.callbacks.OnResizeNeeded != nil {
+					c.callbacks.OnResizeNeeded()
+				}
+			}
+			return 0
+		}
+
 	case wmTrayIcon:
 		evt := lParam & 0xFFFF
 		switch evt {
