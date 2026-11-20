@@ -1,11 +1,10 @@
 (() => {
   const media = document.getElementById('media-player');
   const videoPane = document.getElementById('video-pane');
-  const videoCanvas = document.getElementById('video-canvas');
-  const videoRenderer = document.getElementById('video-renderer');
   const videoLoading = document.getElementById('video-loading-overlay');
   const searchForm = document.getElementById('search-form');
   const searchInput = document.getElementById('search-input');
+  const searchDropdown = document.getElementById('search-dropdown');
   const searchBtnIcon = document.getElementById('search-btn-icon');
   const searchSpinner = document.getElementById('search-spinner');
 
@@ -63,8 +62,19 @@
   const muteIcon = document.getElementById('mute-icon');
   const volumeRange = document.getElementById('volume-range');
 
+  const eqBtn = document.getElementById('eq-btn');
+  const eqBtnLabel = document.getElementById('eq-btn-label');
   const videoToggleBtn = document.getElementById('video-toggle-btn');
   const playlistToggleBtn = document.getElementById('playlist-toggle-btn');
+
+  const audioPopover = document.getElementById('audio-popover');
+  const audioPopClose = document.getElementById('audio-pop-close');
+  const shortcutsHelpBtn = document.getElementById('shortcuts-help-btn');
+  const sleepCountdownLabel = document.getElementById('sleep-countdown-label');
+  const curCopyLinkBtn = document.getElementById('cur-copy-link-btn');
+  const curRadioBtn = document.getElementById('cur-radio-btn');
+  const shortcutsPopover = document.getElementById('shortcuts-popover');
+  const shortcutsCloseBtn = document.getElementById('shortcuts-close-btn');
 
   const playlistDrawer = document.getElementById('playlist-drawer');
   const playlistScroll = document.getElementById('playlist-scroll');
@@ -82,12 +92,15 @@
   const saveQueueBar = document.getElementById('save-queue-bar');
   const saveQueueInput = document.getElementById('save-queue-input');
   const saveQueueConfirm = document.getElementById('save-queue-confirm');
+  const saveQueueMerge = document.getElementById('save-queue-merge');
   const saveEmptyConfirm = document.getElementById('save-empty-confirm');
   const saveQueueCancel = document.getElementById('save-queue-cancel');
   const filterRow = document.getElementById('filter-row');
   const playlistFilter = document.getElementById('playlist-filter');
+  const appendCollectionBtn = document.getElementById('append-collection-btn');
   const playLikedBtn = document.getElementById('play-liked-btn');
   const addPlaylistPopover = document.getElementById('add-playlist-popover');
+  const addPlaylistCopyBtn = document.getElementById('add-playlist-copy-btn');
   const addPlaylistClose = document.getElementById('add-playlist-close');
   const addPlaylistTrack = document.getElementById('add-playlist-track');
   const addPlaylistList = document.getElementById('add-playlist-list');
@@ -129,8 +142,29 @@
     needsReauth: false,
     toastTimer: null,
     vuStyle: 'led', // 'led' | 'bar'
+    eqPreset: 'flat', // 'flat' | 'bass' | 'vocal' | 'bright'
+    playbackRate: 1.0,
+    recentSearches: [],
+    sleepEndMs: 0,
+    sleepTickTimer: null,
+    searchSuggestTimer: null,
+    dragSourceIdx: -1,
+    userInitiatedPlay: false,
     popoverTrack: null,
   };
+
+  function copyTrackURL(tr) {
+    if (!tr || !tr.id) return;
+    const url = `https://www.youtube.com/watch?v=${tr.id}`;
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      navigator.clipboard.writeText(url).then(
+        () => showToast('Copied YouTube link'),
+        () => showToast('Clipboard unavailable')
+      );
+    } else {
+      showToast(url);
+    }
+  }
 
   function showToast(msg) {
     statusToast.textContent = msg;
@@ -214,116 +248,6 @@
     state.videoEnabled = enabled;
     videoPane.classList.toggle('open', enabled);
     videoToggleBtn.classList.toggle('active', enabled);
-    syncVideoRendererSource();
-  }
-
-  let videoRafId = 0;
-
-  function stopVideoCanvasLoop() {
-    if (videoRafId) {
-      cancelAnimationFrame(videoRafId);
-      videoRafId = 0;
-    }
-  }
-
-  function clearVideoCanvas() {
-    if (!videoCanvas) return;
-    const ctx = videoCanvas.getContext('2d');
-    if (ctx) {
-      ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.fillStyle = '#000';
-      ctx.fillRect(0, 0, videoCanvas.width, videoCanvas.height);
-    }
-  }
-
-  function renderSingleVideoFrame() {
-    if (!videoCanvas || !videoRenderer || videoRenderer.readyState < 2 || !videoRenderer.videoWidth) return;
-    const rect = videoCanvas.getBoundingClientRect();
-    const cssW = Math.max(1, Math.round(rect.width || videoPane.clientWidth || 380));
-    const cssH = Math.max(1, Math.round(rect.height || 214));
-    const dpr = Math.min(3, window.devicePixelRatio || 1);
-    const targetW = Math.round(cssW * dpr);
-    const targetH = Math.round(cssH * dpr);
-    if (videoCanvas.width !== targetW || videoCanvas.height !== targetH) {
-      videoCanvas.width = targetW;
-      videoCanvas.height = targetH;
-    }
-    const ctx = videoCanvas.getContext('2d');
-    if (!ctx) return;
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, cssW, cssH);
-
-    const vw = videoRenderer.videoWidth;
-    const vh = videoRenderer.videoHeight;
-    const scale = Math.min(cssW / vw, cssH / vh);
-    const drawW = vw * scale;
-    const drawH = vh * scale;
-    const drawX = (cssW - drawW) * 0.5;
-    const drawY = (cssH - drawH) * 0.5;
-    ctx.drawImage(videoRenderer, drawX, drawY, drawW, drawH);
-  }
-
-  function syncVideoTimeIfDrifted(maxDrift = 0.3) {
-    if (!videoRenderer || videoRenderer.readyState < 1 || videoRenderer.seeking) return;
-    const targetTime = media.currentTime || 0;
-    if (Math.abs((videoRenderer.currentTime || 0) - targetTime) > maxDrift) {
-      try {
-        videoRenderer.currentTime = targetTime;
-      } catch (_) {}
-    }
-  }
-
-  function drawVideoFrame() {
-    if (!state.videoEnabled || media.paused || media.ended || !videoRenderer) {
-      videoRafId = 0;
-      return;
-    }
-    videoRenderer.muted = true;
-    syncVideoTimeIfDrifted();
-    if (videoRenderer.paused && videoRenderer.readyState >= 2) {
-      videoRenderer.play().catch(() => {});
-    }
-    renderSingleVideoFrame();
-    videoRafId = requestAnimationFrame(drawVideoFrame);
-  }
-
-  function syncVideoRendererSource() {
-    if (!videoRenderer) return;
-    videoRenderer.muted = true;
-    const activeSrc = media.getAttribute('src') || '';
-    if (!state.videoEnabled || !activeSrc) {
-      stopVideoCanvasLoop();
-      if (!videoRenderer.paused) {
-        videoRenderer.pause();
-      }
-      if (videoRenderer.getAttribute('src')) {
-        videoRenderer.removeAttribute('src');
-        videoRenderer.load();
-      }
-      clearVideoCanvas();
-      return;
-    }
-
-    if (videoRenderer.getAttribute('src') !== activeSrc) {
-      videoRenderer.src = activeSrc;
-      videoRenderer.load();
-    }
-
-    syncVideoTimeIfDrifted();
-
-    if (!media.paused && !media.ended) {
-      videoRenderer.play().catch(() => {});
-      if (!videoRafId) {
-        videoRafId = requestAnimationFrame(drawVideoFrame);
-      }
-    } else {
-      stopVideoCanvasLoop();
-      if (!videoRenderer.paused) {
-        videoRenderer.pause();
-      }
-      renderSingleVideoFrame();
-    }
   }
 
   function applyPlaylistModeUI(expanded) {
@@ -381,11 +305,14 @@
     authAccountsList.innerHTML = '';
     if (accounts.length === 0) return;
 
+    const hasPageMatch = accounts.some((a) => (a.page_id || '') === (state.activePageId || ''));
     const frag = document.createDocumentFragment();
     accounts.forEach((acc) => {
       const btn = document.createElement('button');
       btn.type = 'button';
-      const isSelected = Boolean(acc.selected || (state.activePageId && acc.page_id === state.activePageId));
+      const isSelected = hasPageMatch
+        ? ((acc.page_id || '') === (state.activePageId || ''))
+        : Boolean(acc.selected);
       btn.className = 'auth-account-item' + (isSelected ? ' active' : '');
 
       const avWrap = document.createElement('span');
