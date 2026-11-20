@@ -133,9 +133,13 @@ func TestStartupHookAppliesLayeredExactRectAndStripsResizeBeforeShow(t *testing.
 		t.Fatalf("expected timerPeriodOn=false after endHighResTimer")
 	}
 
-	// Verify MinimizeToTray triggered mid-restore animation preserves resting savedRect.
+	// Verify tray minimize while restore animation is active preserves resting savedRect & SetClientSize updates height.
 	ctrl.savedRect = rect{Left: 200, Top: 150, Right: 580, Bottom: 630}
 	ctrl.trayAnim.mode = trayAnimRestore
+	ctrl.SetClientSize(380, 700, false)
+	if ctrl.savedRect.Bottom <= ctrl.savedRect.Top+500 {
+		t.Fatalf("expected SetClientSize during trayAnimRestore to update savedRect height, got %+v", ctrl.savedRect)
+	}
 	ctrl.MinimizeToTray()
 	procKillTimer.Call(ctrl.hwnd, timerTrayAnimID)
 	ctrl.endHighResTimer()

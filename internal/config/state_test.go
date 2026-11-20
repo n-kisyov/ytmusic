@@ -266,3 +266,49 @@ func TestSaveAppStateToConcurrent(t *testing.T) {
 		t.Fatalf("unexpected persisted search query: %q", loaded.SearchQuery)
 	}
 }
+
+func TestAppStateRenameMoveAndAudioPrefs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	s := DefaultAppState()
+	t1 := Track{ID: "t1", Title: "One", Artist: "A", DurationSec: 120}
+	t2 := Track{ID: "t2", Title: "Two", Artist: "B", DurationSec: 140}
+	t3 := Track{ID: "t3", Title: "Three", Artist: "C", DurationSec: 160}
+	if err := s.CreatePlaylist("Roadtrip", []Track{t1, t2, t3}); err != nil {
+		t.Fatalf("CreatePlaylist failed: %v", err)
+	}
+	if err := s.RenamePlaylist("Roadtrip", "Late Night"); err != nil {
+		t.Fatalf("RenamePlaylist failed: %v", err)
+	}
+	if s.SavedPlaylists[0].Name != "Late Night" {
+		t.Fatalf("expected renamed playlist 'Late Night', got %q", s.SavedPlaylists[0].Name)
+	}
+	if err := s.MoveTrackInPlaylist("Late Night", 2, 0); err != nil {
+		t.Fatalf("MoveTrackInPlaylist failed: %v", err)
+	}
+	if s.SavedPlaylists[0].Tracks[0].ID != "t3" || s.SavedPlaylists[0].Tracks[2].ID != "t2" {
+		t.Fatalf("unexpected track order after move: %+v", s.SavedPlaylists[0].Tracks)
+	}
+
+	s.AddRecentSearch("Taylor Swift")
+	s.AddRecentSearch("Daft Punk")
+	s.AddRecentSearch("taylor swift")
+	if len(s.RecentSearches) != 2 || s.RecentSearches[0] != "taylor swift" {
+		t.Fatalf("unexpected recent searches after case-insensitive dedupe: %+v", s.RecentSearches)
+	}
+
+	s.VuStyle = "bar"
+	s.EQPreset = "bass"
+	s.PlaybackRate = 1.25
+	if err := SaveAppStateTo(path, s); err != nil {
+		t.Fatalf("SaveAppStateTo failed: %v", err)
+	}
+	loaded, err := LoadAppStateFrom(path)
+	if err != nil {
+		t.Fatalf("LoadAppStateFrom failed: %v", err)
+	}
+	if loaded.VuStyle != "bar" || loaded.EQPreset != "bass" || loaded.PlaybackRate != 1.25 || len(loaded.RecentSearches) != 2 {
+		t.Fatalf("loaded new prefs mismatch: %+v", loaded)
+	}
+}

@@ -129,6 +129,7 @@ var (
 	procFindWindowExW             = user32.NewProc("FindWindowExW")
 	procSystemParametersInfoW     = user32.NewProc("SystemParametersInfoW")
 	procGetSystemMetrics          = user32.NewProc("GetSystemMetrics")
+	procCopyRect                  = user32.NewProc("CopyRect")
 	procDestroyWindow             = user32.NewProc("DestroyWindow")
 	procRegisterHotKey            = user32.NewProc("RegisterHotKey")
 	procUnregisterHotKey          = user32.NewProc("UnregisterHotKey")
@@ -718,12 +719,13 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 
 	case wmDpiChanged:
 		if lParam != 0 {
-			suggested := (*rect)(unsafe.Pointer(lParam))
+			var suggested rect
+			procCopyRect.Call(uintptr(unsafe.Pointer(&suggested)), lParam)
 			w := suggested.Right - suggested.Left
 			h := suggested.Bottom - suggested.Top
 			if w > 80 && h > 80 {
 				procSetWindowPos.Call(hwnd, 0, uintptr(suggested.Left), uintptr(suggested.Top), uintptr(w), uintptr(h), swpNoZOrder|swpNoActivate)
-				c.savedRect = *suggested
+				c.savedRect = suggested
 				if c.callbacks.OnResizeNeeded != nil {
 					c.callbacks.OnResizeNeeded()
 				}

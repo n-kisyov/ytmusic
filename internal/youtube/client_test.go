@@ -336,3 +336,79 @@ func TestLiveYouTubeSearch30Songs(t *testing.T) {
 	t.Logf("live search returned %d tracks, first=%q (%s), contLen=%d",
 		len(res.Tracks), res.Tracks[0].Title, res.Tracks[0].DurationText, len(res.ContinuationToken))
 }
+
+func TestParseYouTubeInputAndTokenExtractionAndBrandSwitchToPersonal(t *testing.T) {
+	v, pl, ok := ParseYouTubeInput("https://www.youtube.com/watch?v=e-ORhEE9VVg&list=PL123456")
+	if !ok || v != "e-ORhEE9VVg" || pl != "PL123456" {
+		t.Fatalf("unexpected watch+list parse: v=%q pl=%q ok=%v", v, pl, ok)
+	}
+	v2, pl2, ok2 := ParseYouTubeInput("https://youtu.be/nfWlot6h_JM")
+	if !ok2 || v2 != "nfWlot6h_JM" || pl2 != "" {
+		t.Fatalf("unexpected youtu.be parse: v=%q pl=%q ok=%v", v2, pl2, ok2)
+	}
+	if _, _, okSearch := ParseYouTubeInput("taylor swift blank space"); okSearch {
+		t.Fatalf("expected plain search query not parsed as YouTube URL")
+	}
+
+	// Ensure continuationItemRenderer token takes precedence over stray continuationCommand.
+	doc := map[string]any{
+		"header": map[string]any{
+			"chipBar": map[string]any{
+				"continuationCommand": map[string]any{"token": "WRONG_CHIP_TOKEN"},
+			},
+		},
+		"contents": []any{
+			map[string]any{
+				"playlistVideoRenderer": map[string]any{
+					"videoId":       "vid_p1",
+					"title":         map[string]any{"simpleText": "Playlist Song"},
+					"shortBylineText": map[string]any{"simpleText": "Artist"},
+					"lengthSeconds": "215",
+				},
+			},
+			map[string]any{
+				"continuationItemRenderer": map[string]any{
+					"continuationEndpoint": map[string]any{
+						"continuationCommand": map[string]any{"token": "REAL_FEED_TOKEN"},
+					},
+				},
+			},
+		},
+	}
+	tracks, tok := extractTracksAndToken(doc)
+	if len(tracks) != 1 || tracks[0].ID != "vid_p1" || tracks[0].DurationSec != 215 {
+		t.Fatalf("unexpected parsed playlistVideoRenderer track: %+v", tracks)
+	}
+	if tok != "REAL_FEED_TOKEN" {
+		t.Fatalf("expected REAL_FEED_TOKEN, got %q", tok)
+	}
+
+	// Ensure switching back to personal (ActivePageID="") clears stale Brand Account selection.
+	accounts := []config.BrandAccount{
+		{Name: "Personal", PageID: "", Selected: false},
+		{Name: "Brand", PageID: "12345", Selected: true},
+	}
+	prof := AccountProfile{ActivePageID: ""}
+	markAndMergeAccounts(accounts, &prof, true)
+	if !prof.Accounts[0].Selected || prof.Accounts[1].Selected {
+		t.Fatalf("expected only Personal selected when switching to empty ActivePageID, got %+v", prof.Accounts)
+	}
+}
+
+func TestSuggestQueries(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `["taylor",["taylor swift","taylor swift blank space","Taylor Swift","taylor swift shake it off"]]`)
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.Client())
+	client.SetSuggestURL(srv.URL)
+	suggestions, err := client.SuggestQueries(context.Background(), "taylor")
+	if err != nil {
+		t.Fatalf("SuggestQueries failed: %v", err)
+	}
+	if len(suggestions) != 3 {
+		t.Fatalf("expected 3 deduplicated suggestions, got %+v", suggestions)
+	}
+}
