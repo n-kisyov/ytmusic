@@ -513,26 +513,20 @@ html, body {
   border-bottom: 1px solid var(--yt-border);
 }
 
-.video-canvas {
+.media-player-video {
   width: 100%;
   height: 100%;
   display: block;
+  object-fit: contain;
   background: #000;
 }
 
-.video-hidden-decoder {
+.video-pane:not(.open) .media-player-video {
   position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 16px;
-  height: 9px;
-  opacity: 0.01;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
   pointer-events: none;
-}
-
-.video-pane:not(.open) .video-hidden-decoder,
-#media-player {
-  display: none !important;
 }
 
 .video-loading {
@@ -615,14 +609,23 @@ html, body {
 }
 
 .track-counter {
+  font-family: inherit;
   font-size: 11px;
   font-weight: 500;
   color: var(--yt-text-secondary);
   background: var(--yt-bg-chip);
+  border: none;
   border-radius: 12px;
   padding: 2px 8px;
   flex-shrink: 0;
   font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.track-counter:hover {
+  background: var(--yt-bg-chip-hover);
+  color: var(--yt-text-primary);
 }
 
 .vu-meter {
@@ -866,7 +869,7 @@ html, body {
 }
 
 #volume-range {
-  width: 44px;
+  width: 38px;
   height: 3px;
   -webkit-appearance: none;
   appearance: none;
@@ -887,12 +890,12 @@ html, body {
 .mode-toggles {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 3px;
 }
 
 .toggle-pill {
   height: 26px;
-  padding: 0 8px;
+  padding: 0 7px;
   border-radius: 16px;
   border: none;
   background: var(--yt-bg-chip);
@@ -904,7 +907,14 @@ html, body {
   font-size: 11px;
   font-weight: 500;
   cursor: pointer;
+  white-space: nowrap;
   transition: background 0.12s ease, color 0.12s ease;
+}
+
+.eq-pill {
+  padding: 0 6px;
+  font-size: 10.5px;
+  font-weight: 600;
 }
 
 .toggle-pill svg {
@@ -1105,6 +1115,18 @@ html, body {
   background: var(--yt-bg-row-active);
 }
 
+.track-item.dragging {
+  opacity: 0.45;
+}
+
+.track-item.drag-over-top {
+  box-shadow: inset 0 2px 0 var(--yt-red);
+}
+
+.track-item.drag-over-bottom {
+  box-shadow: inset 0 -2px 0 var(--yt-red);
+}
+
 .track-actions {
   display: none;
   align-items: center;
@@ -1185,6 +1207,27 @@ html, body {
   font-size: 11px;
   color: var(--yt-text-secondary);
   margin-top: 2px;
+}
+
+.saved-playlist-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.saved-rename-input {
+  width: 100%;
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--yt-search-focus);
+  background: var(--yt-search-bg);
+  color: var(--yt-text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  outline: none;
+  user-select: text;
 }
 
 .track-idx {
