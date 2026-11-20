@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,16 +20,18 @@ import (
 )
 
 const (
-	defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-	webClientName    = "WEB"
-	webClientVersion = "2.20250115.01.00"
-	youtubeOrigin    = "https://www.youtube.com"
+	defaultUserAgent  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	webClientName     = "WEB"
+	webClientVersion  = "2.20250115.01.00"
+	youtubeOrigin     = "https://www.youtube.com"
+	defaultSuggestURL = "https://suggestqueries.google.com/complete/search"
 )
 
 // Client interacts with YouTube InnerTube APIs for search and playlist continuation.
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
+	suggestURL string
 
 	mu       sync.Mutex
 	auth     config.AuthState
@@ -43,6 +46,7 @@ func NewClient(httpClient *http.Client) *Client {
 	return &Client{
 		httpClient: httpClient,
 		baseURL:    youtubeOrigin,
+		suggestURL: defaultSuggestURL,
 	}
 }
 
@@ -51,6 +55,13 @@ func (c *Client) SetBaseURL(baseURL string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.baseURL = strings.TrimRight(baseURL, "/")
+}
+
+// SetSuggestURL overrides the YouTube autocomplete endpoint (useful for testing with httptest).
+func (c *Client) SetSuggestURL(suggestURL string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.suggestURL = suggestURL
 }
 
 // SetAuth updates the authentication state used for InnerTube requests.
@@ -211,12 +222,18 @@ func (c *Client) FetchMoreSongs(ctx context.Context, continuationToken, seedVide
 	}
 
 	// Fallback to /youtubei/v1/next Radio Mix if continuation yielded nothing or was exhausted.
-	if len(collected) == 0 && seedVideoID != "" {
-		mixTracks, _, err := c.fetchNextMix(ctx, seedVideoID, "")
+	if (len(collected) == 0 || (len(collected) < 5 && token == "")) && seedVideoID != "" {
+		mixTracks, mixToken, err := c.fetchNextMix(ctx, seedVideoID, "")
 		if err != nil {
-			return SearchResult{}, err
+			if len(collected) == 0 {
+				return SearchResult{}, err
+			}
+		} else {
+			collected = appendUniqueTracks(collected, mixTracks, seen)
+			if token == "" && mixToken != "" {
+				token = mixToken
+			}
 		}
-		collected = appendUniqueTracks(collected, mixTracks, seen)
 	}
 
 	return SearchResult{
@@ -225,7 +242,316 @@ func (c *Client) FetchMoreSongs(ctx context.Context, continuationToken, seedVide
 	}, nil
 }
 
+// ParseYouTubeInput detects YouTube video/playlist links and extracts videoID and playlistID.
+func ParseYouTubeInput(raw string) (videoID, playlistID string, isURL bool) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return "", "", false
+	}
+	lower := strings.ToLower(trimmed)
+	if !strings.Contains(lower, "youtube.com") && !strings.Contains(lower, "youtu.be") {
+		return "", "", false
+	}
+	candidate := trimmed
+	if !strings.Contains(lower, "://") {
+		candidate = "https://" + trimmed
+	}
+	u, err := url.Parse(candidate)
+	if err != nil {
+		return "", "", false
+	}
+	host := strings.ToLower(u.Hostname())
+	switch host {
+	case "youtu.be":
+		seg := strings.Trim(u.Path, "/")
+		if seg != "" {
+			videoID = strings.Split(seg, "/")[0]
+		}
+		playlistID = strings.TrimSpace(u.Query().Get("list"))
+		return videoID, playlistID, videoID != "" || playlistID != ""
+	case "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com":
+		q := u.Query()
+		videoID = strings.TrimSpace(q.Get("v"))
+		playlistID = strings.TrimSpace(q.Get("list"))
+		if videoID == "" {
+			parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+			if len(parts) >= 2 {
+				switch parts[0] {
+				case "shorts", "embed", "live":
+					videoID = parts[1]
+				}
+			}
+		}
+		return videoID, playlistID, videoID != "" || playlistID != ""
+	default:
+		return "", "", false
+	}
+}
+
+// ResolveURLPlaylist resolves a pasted YouTube watch/playlist URL into a playable queue.
+func (c *Client) ResolveURLPlaylist(ctx context.Context, rawURL string, targetCount int) (SearchResult, string, error) {
+	videoID, playlistID, ok := ParseYouTubeInput(rawURL)
+	if !ok {
+		return SearchResult{}, "", errors.New("unsupported YouTube URL")
+	}
+	if targetCount <= 0 {
+		targetCount = 30
+	}
+	c.ClearOverflow()
+
+	if playlistID != "" {
+		res, err := c.fetchBrowsePlaylist(ctx, playlistID, videoID, targetCount)
+		if err == nil && len(res.Tracks) > 0 {
+			return res, "Loaded YouTube playlist", nil
+		}
+		if videoID != "" {
+			mixTracks, mixToken, errNext := c.fetchNextMixList(ctx, videoID, playlistID)
+			if errNext == nil && len(mixTracks) > 0 {
+				return c.trimAndStoreOverflow(mixTracks, mixToken, targetCount), "Loaded YouTube playlist", nil
+			}
+		}
+	}
+
+	if videoID != "" {
+		res, err := c.StartRadioMix(ctx, videoID, nil, targetCount)
+		if err != nil {
+			return SearchResult{}, "", err
+		}
+		return res, "Loaded YouTube track & Radio Mix", nil
+	}
+	return SearchResult{}, "", errors.New("no playable tracks found at YouTube URL")
+}
+
+// StartRadioMix builds a 30-song Radio Mix queue seeded from seedVideoID.
+func (c *Client) StartRadioMix(ctx context.Context, seedVideoID string, seedTrack *config.Track, targetCount int) (SearchResult, error) {
+	seedVideoID = strings.TrimSpace(seedVideoID)
+	if seedVideoID == "" {
+		return SearchResult{}, errors.New("seed video ID cannot be empty")
+	}
+	if targetCount <= 0 {
+		targetCount = 30
+	}
+	c.ClearOverflow()
+
+	seen := make(map[string]struct{}, targetCount+16)
+	tracks := make([]config.Track, 0, targetCount+16)
+
+	if seedTrack != nil && seedTrack.ID != "" {
+		tracks = appendUniqueTracks(tracks, []config.Track{*seedTrack}, seen)
+	} else if det, err := c.fetchVideoDetailsTrack(ctx, seedVideoID); err == nil && det.ID != "" {
+		tracks = appendUniqueTracks(tracks, []config.Track{det}, seen)
+	}
+
+	mixTracks, token, err := c.fetchNextMix(ctx, seedVideoID, "")
+	if err != nil && len(tracks) == 0 {
+		return SearchResult{}, err
+	}
+	tracks = appendUniqueTracks(tracks, mixTracks, seen)
+
+	for attempts := 0; len(tracks) < targetCount && token != "" && attempts < 2; attempts++ {
+		more, nextTok, nextErr := c.fetchNextMix(ctx, seedVideoID, token)
+		if nextErr != nil {
+			break
+		}
+		prevLen := len(tracks)
+		tracks = appendUniqueTracks(tracks, more, seen)
+		token = nextTok
+		if len(tracks) == prevLen && token == "" {
+			break
+		}
+	}
+
+	return c.trimAndStoreOverflow(tracks, token, targetCount), nil
+}
+
+func (c *Client) trimAndStoreOverflow(tracks []config.Track, token string, targetCount int) SearchResult {
+	if len(tracks) > targetCount {
+		c.mu.Lock()
+		c.overflow = append([]config.Track(nil), tracks[targetCount:]...)
+		c.mu.Unlock()
+		tracks = tracks[:targetCount]
+	}
+	return SearchResult{
+		Tracks:            tracks,
+		ContinuationToken: token,
+	}
+}
+
+func (c *Client) fetchBrowsePlaylist(ctx context.Context, playlistID, startVideoID string, targetCount int) (SearchResult, error) {
+	browseID := playlistID
+	if !strings.HasPrefix(browseID, "VL") {
+		browseID = "VL" + browseID
+	}
+	resp, err := c.postInnerTube(ctx, "/youtubei/v1/browse?prettyPrint=false", map[string]any{
+		"context":  c.buildContext(),
+		"browseId": browseID,
+	})
+	if err != nil {
+		return SearchResult{}, err
+	}
+	seen := make(map[string]struct{}, targetCount+16)
+	first, token := extractTracksAndToken(resp)
+	tracks := appendUniqueTracks(nil, first, seen)
+
+	for attempts := 0; len(tracks) < targetCount && token != "" && attempts < 3; attempts++ {
+		nextResp, nextErr := c.postInnerTube(ctx, "/youtubei/v1/browse?prettyPrint=false", map[string]any{
+			"context":      c.buildContext(),
+			"continuation": token,
+		})
+		if nextErr != nil {
+			break
+		}
+		more, nextTok := extractTracksAndToken(nextResp)
+		prevLen := len(tracks)
+		tracks = appendUniqueTracks(tracks, more, seen)
+		token = nextTok
+		if len(tracks) == prevLen && token == "" {
+			break
+		}
+	}
+
+	if startVideoID != "" {
+		for i, tr := range tracks {
+			if tr.ID == startVideoID && i > 0 {
+				reordered := make([]config.Track, 0, len(tracks))
+				reordered = append(reordered, tracks[i:]...)
+				reordered = append(reordered, tracks[:i]...)
+				tracks = reordered
+				break
+			}
+		}
+	}
+
+	return c.trimAndStoreOverflow(tracks, token, targetCount), nil
+}
+
+func (c *Client) fetchVideoDetailsTrack(ctx context.Context, videoID string) (config.Track, error) {
+	resp, err := c.postInnerTube(ctx, "/youtubei/v1/player?prettyPrint=false", map[string]any{
+		"context":        c.buildContext(),
+		"videoId":        videoID,
+		"contentCheckOk": true,
+		"racyCheckOk":    true,
+	})
+	if err != nil {
+		return config.Track{}, err
+	}
+	vd, ok := resp["videoDetails"].(map[string]any)
+	if !ok {
+		return config.Track{}, errors.New("missing videoDetails")
+	}
+	title, _ := vd["title"].(string)
+	author, _ := vd["author"].(string)
+	lenStr, _ := vd["lengthSeconds"].(string)
+	durSec, _ := strconv.Atoi(strings.TrimSpace(lenStr))
+	if title == "" || durSec <= 0 {
+		return config.Track{}, errors.New("invalid videoDetails")
+	}
+	if author == "" {
+		author = "YouTube"
+	}
+	thumb := extractThumbnailURL(vd["thumbnail"], videoID)
+	return config.Track{
+		ID:           videoID,
+		Title:        title,
+		Artist:       author,
+		DurationSec:  durSec,
+		DurationText: formatDurationClock(durSec),
+		Thumbnail:    thumb,
+	}, nil
+}
+
+func formatDurationClock(sec int) string {
+	if sec <= 0 {
+		return "0:00"
+	}
+	h := sec / 3600
+	m := (sec % 3600) / 60
+	s := sec % 60
+	if h > 0 {
+		return fmt.Sprintf("%d:%02d:%02d", h, m, s)
+	}
+	return fmt.Sprintf("%d:%02d", m, s)
+}
+
+// SuggestQueries retrieves live YouTube search autocomplete suggestions for partial query text.
+func (c *Client) SuggestQueries(ctx context.Context, query string) ([]string, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return []string{}, nil
+	}
+	if _, _, isURL := ParseYouTubeInput(query); isURL {
+		return []string{}, nil
+	}
+
+	c.mu.Lock()
+	endpoint := c.suggestURL
+	c.mu.Unlock()
+	if endpoint == "" {
+		endpoint = defaultSuggestURL
+	}
+
+	reqURL := endpoint + "?client=firefox&ds=yt&q=" + url.QueryEscape(query)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", defaultUserAgent)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("suggest HTTP %d", resp.StatusCode)
+	}
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 256<<10))
+	if err != nil {
+		return nil, err
+	}
+
+	var parsed []any
+	if err := json.Unmarshal(raw, &parsed); err != nil || len(parsed) < 2 {
+		return []string{}, nil
+	}
+	arr, ok := parsed[1].([]any)
+	if !ok {
+		return []string{}, nil
+	}
+	out := make([]string, 0, 8)
+	seen := make(map[string]struct{}, 8)
+	for _, item := range arr {
+		s, ok := item.(string)
+		if !ok {
+			continue
+		}
+		s = strings.TrimSpace(s)
+		if s == "" || strings.EqualFold(s, query) {
+			continue
+		}
+		low := strings.ToLower(s)
+		if _, dup := seen[low]; dup {
+			continue
+		}
+		seen[low] = struct{}{}
+		out = append(out, s)
+		if len(out) >= 8 {
+			break
+		}
+	}
+	return out, nil
+}
+
 func (c *Client) fetchNextMix(ctx context.Context, videoID, continuation string) ([]config.Track, string, error) {
+	return c.fetchNextMixList(ctx, videoID, "RD"+videoID, continuation)
+}
+
+func (c *Client) fetchNextMixList(ctx context.Context, videoID, playlistID string, continuationOpt ...string) ([]config.Track, string, error) {
+	continuation := ""
+	if len(continuationOpt) > 0 {
+		continuation = continuationOpt[0]
+	}
 	payload := map[string]any{
 		"context": c.buildContext(),
 	}
@@ -233,7 +559,9 @@ func (c *Client) fetchNextMix(ctx context.Context, videoID, continuation string)
 		payload["continuation"] = continuation
 	} else {
 		payload["videoId"] = videoID
-		payload["playlistId"] = "RD" + videoID
+		if playlistID != "" {
+			payload["playlistId"] = playlistID
+		}
 	}
 	resp, err := c.postInnerTube(ctx, "/youtubei/v1/next?prettyPrint=false", payload)
 	if err != nil {
@@ -369,10 +697,35 @@ func appendUniqueTracks(dst, src []config.Track, seen map[string]struct{}) []con
 }
 
 // extractTracksAndToken walks arbitrary InnerTube JSON responses and extracts playable tracks
-// and the continuation token.
+// and the continuation token (preferring continuationItemRenderer over generic commands).
 func extractTracksAndToken(root any) ([]config.Track, string) {
 	var tracks []config.Track
-	var continuation string
+	var feedContinuation string
+	var fallbackContinuation string
+
+	var findToken func(node any) string
+	findToken = func(node any) string {
+		switch v := node.(type) {
+		case map[string]any:
+			if cc, ok := v["continuationCommand"].(map[string]any); ok {
+				if tok, ok := cc["token"].(string); ok && tok != "" {
+					return tok
+				}
+			}
+			for _, child := range v {
+				if tok := findToken(child); tok != "" {
+					return tok
+				}
+			}
+		case []any:
+			for _, item := range v {
+				if tok := findToken(item); tok != "" {
+					return tok
+				}
+			}
+		}
+		return ""
+	}
 
 	var walk func(node any)
 	walk = func(node any) {
@@ -380,6 +733,12 @@ func extractTracksAndToken(root any) ([]config.Track, string) {
 		case map[string]any:
 			if vr, ok := v["videoRenderer"].(map[string]any); ok {
 				if t, ok := parseVideoRenderer(vr); ok {
+					tracks = append(tracks, t)
+				}
+				return
+			}
+			if pvr, ok := v["playlistVideoRenderer"].(map[string]any); ok {
+				if t, ok := parseVideoRenderer(pvr); ok {
 					tracks = append(tracks, t)
 				}
 				return
@@ -402,9 +761,15 @@ func extractTracksAndToken(root any) ([]config.Track, string) {
 				}
 				return
 			}
+			if cir, ok := v["continuationItemRenderer"].(map[string]any); ok {
+				if tok := findToken(cir); tok != "" {
+					feedContinuation = tok
+				}
+				return
+			}
 			if cc, ok := v["continuationCommand"].(map[string]any); ok {
-				if tok, ok := cc["token"].(string); ok && tok != "" {
-					continuation = tok
+				if tok, ok := cc["token"].(string); ok && tok != "" && fallbackContinuation == "" {
+					fallbackContinuation = tok
 				}
 			}
 			for _, child := range v {
@@ -418,7 +783,10 @@ func extractTracksAndToken(root any) ([]config.Track, string) {
 	}
 
 	walk(root)
-	return tracks, continuation
+	if feedContinuation != "" {
+		return tracks, feedContinuation
+	}
+	return tracks, fallbackContinuation
 }
 
 func parseVideoRenderer(m map[string]any) (config.Track, bool) {
@@ -434,6 +802,14 @@ func parseVideoRenderer(m map[string]any) (config.Track, bool) {
 
 	durationText := extractText(m["lengthText"])
 	durationSec := ParseDurationSeconds(durationText)
+	if durationSec <= 0 {
+		if ls, ok := m["lengthSeconds"].(string); ok && ls != "" {
+			if parsed, err := strconv.Atoi(strings.TrimSpace(ls)); err == nil && parsed > 0 {
+				durationSec = parsed
+				durationText = formatDurationClock(parsed)
+			}
+		}
+	}
 	if durationSec <= 0 {
 		// Skip live broadcasts, shorts shelves without duration, or upcoming premieres.
 		return config.Track{}, false
