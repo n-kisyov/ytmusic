@@ -441,10 +441,20 @@
     updateLikeButtonUI();
   }
 
-  // --- Minimalistic Stereo (L/R) VU & Peak Meter ---
+  // --- Minimalistic Stereo (L/R) VU Meter & 3-Band Web Audio EQ ---
+  const EQ_PRESETS = {
+    flat: [0, 0, 0],
+    bass: [6, 0, 1],
+    vocal: [-2, 4.5, 2],
+    bright: [0, 1.5, 5.5],
+  };
+
   const vu = {
     audioCtx: null,
     sourceNode: null,
+    eqLow: null,
+    eqMid: null,
+    eqHigh: null,
     splitter: null,
     analyserL: null,
     analyserR: null,
@@ -463,10 +473,32 @@
     ctx2d: vuCanvas ? vuCanvas.getContext('2d') : null,
   };
 
+  function applyEQPresetGains() {
+    if (!vu.eqLow || !vu.eqMid || !vu.eqHigh) return;
+    const [gLow, gMid, gHigh] = EQ_PRESETS[state.eqPreset] || EQ_PRESETS.flat;
+    vu.eqLow.gain.value = gLow;
+    vu.eqMid.gain.value = gMid;
+    vu.eqHigh.gain.value = gHigh;
+  }
+
   function attachStereoAnalyserNodes() {
     if (vu.graphAttached || !vu.audioCtx || vu.audioCtx.state !== 'running') return;
     try {
       vu.sourceNode = vu.audioCtx.createMediaElementSource(media);
+      vu.eqLow = vu.audioCtx.createBiquadFilter();
+      vu.eqLow.type = 'lowshelf';
+      vu.eqLow.frequency.value = 100;
+
+      vu.eqMid = vu.audioCtx.createBiquadFilter();
+      vu.eqMid.type = 'peaking';
+      vu.eqMid.frequency.value = 1000;
+      vu.eqMid.Q.value = 1.0;
+
+      vu.eqHigh = vu.audioCtx.createBiquadFilter();
+      vu.eqHigh.type = 'highshelf';
+      vu.eqHigh.frequency.value = 8000;
+      applyEQPresetGains();
+
       vu.splitter = vu.audioCtx.createChannelSplitter(2);
       vu.analyserL = vu.audioCtx.createAnalyser();
       vu.analyserR = vu.audioCtx.createAnalyser();
@@ -477,8 +509,11 @@
       vu.bufL = new Float32Array(vu.analyserL.fftSize);
       vu.bufR = new Float32Array(vu.analyserR.fftSize);
 
-      vu.sourceNode.connect(vu.audioCtx.destination);
-      vu.sourceNode.connect(vu.splitter);
+      vu.sourceNode.connect(vu.eqLow);
+      vu.eqLow.connect(vu.eqMid);
+      vu.eqMid.connect(vu.eqHigh);
+      vu.eqHigh.connect(vu.audioCtx.destination);
+      vu.eqHigh.connect(vu.splitter);
       vu.splitter.connect(vu.analyserL, 0);
       vu.splitter.connect(vu.analyserR, 1);
       vu.graphAttached = true;
@@ -528,7 +563,11 @@
       if (abs > peak) peak = abs;
     }
     const rms = Math.sqrt(sumSq / buf.length);
-    const amp = Math.max(rms * 1.45, peak * 0.85);
+    let amp = Math.max(rms * 1.45, peak * 0.85);
+    // Compensate for HTMLMediaElement volume attenuation so VU remains legible at low volume.
+    if (!state.muted && state.volume > 0.01 && state.volume < 0.99) {
+      amp = amp / Math.max(0.18, state.volume);
+    }
     if (amp <= 0.0001) return 0;
     const db = 20 * Math.log10(amp);
     return Math.max(0, Math.min(1, (db + 38) / 37));
@@ -760,10 +799,28 @@
       (state.activeTab === 'liked' && state.likedTracks.length > 0) ||
       Boolean(selectedSp && Array.isArray(selectedSp.tracks) && selectedSp.tracks.length > 0);
     playLikedBtn.classList.toggle('hidden', !canPlayCollection);
+    if (appendCollectionBtn) {
+      appendCollectionBtn.classList.toggle('hidden', !canPlayCollection);
+    }
     saveQueueBtn.classList.remove('hidden');
     if (saveQueueConfirm) {
       saveQueueConfirm.classList.toggle('hidden', state.playlist.length === 0);
     }
+    updateSaveBarButtonsUI();
+  }
+
+  function updateSaveBarButtonsUI() {
+    if (!saveQueueConfirm || !saveQueueMerge || !saveQueueInput) return;
+    if (state.playlist.length === 0) {
+      saveQueueConfirm.classList.add('hidden');
+      saveQueueMerge.classList.add('hidden');
+      return;
+    }
+    const name = saveQueueInput.value.trim();
+    const exists = Boolean(name && findSavedPlaylist(name));
+    saveQueueConfirm.classList.remove('hidden');
+    saveQueueConfirm.textContent = exists ? 'Replace' : 'Save Queue';
+    saveQueueMerge.classList.toggle('hidden', !exists);
   }
 
   function matchesFilter(tr) {
@@ -879,6 +936,63 @@
       '+',
       (btn) => openAddToPlaylistPopover(tr, btn)
     );
+  }
+
+  function makeRadioRowButton(tr) {
+    return makeActionButton(
+      'row-act-btn',
+      'Start 30-song Radio Mix from this song',
+      '✦',
+      () => startTrackRadio(tr)
+    );
+  }
+
+  function attachRowDragHandlers(row, idx, onReorder) {
+    row.draggable = true;
+    row.addEventListener('dragstart', (e) => {
+      if (state.filterQuery) {
+        e.preventDefault();
+        return;
+      }
+      state.dragSourceIdx = idx;
+      row.classList.add('dragging');
+      if (e.dataTransfer) {
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', String(idx));
+      }
+    });
+    row.addEventListener('dragend', () => {
+      state.dragSourceIdx = -1;
+      row.classList.remove('dragging', 'drag-over-top', 'drag-over-bottom');
+      playlistList.querySelectorAll('.drag-over-top, .drag-over-bottom').forEach((el) => {
+        el.classList.remove('drag-over-top', 'drag-over-bottom');
+      });
+    });
+    row.addEventListener('dragover', (e) => {
+      if (state.dragSourceIdx < 0 || state.dragSourceIdx === idx || state.filterQuery) return;
+      e.preventDefault();
+      const rect = row.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      row.classList.toggle('drag-over-top', !after);
+      row.classList.toggle('drag-over-bottom', after);
+    });
+    row.addEventListener('dragleave', () => {
+      row.classList.remove('drag-over-top', 'drag-over-bottom');
+    });
+    row.addEventListener('drop', (e) => {
+      e.preventDefault();
+      const from = state.dragSourceIdx;
+      state.dragSourceIdx = -1;
+      row.classList.remove('drag-over-top', 'drag-over-bottom');
+      if (from < 0 || from === idx || state.filterQuery) return;
+      const rect = row.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      let to = after ? idx + 1 : idx;
+      if (from < to) to--;
+      if (from !== to) {
+        onReorder(from, to);
+      }
+    });
   }
 
   function buildTrackRow({ tr, displayIndex, active, buttons, onRowClick, datasetIndex }) {
