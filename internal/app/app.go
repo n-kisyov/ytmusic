@@ -1188,7 +1188,7 @@ func (a *App) updateTrayTitleLocked() {
 	}
 	tip := "ytmusic"
 	if a.state.CurrentIndex >= 0 && a.state.CurrentIndex < len(a.state.Playlist) {
-		tip = "ytmusic — " + a.state.Playlist[a.state.CurrentIndex].Title
+		tip = "ytmusic :: " + a.state.Playlist[a.state.CurrentIndex].Title
 	}
 	a.winCtrl.UpdateTrayTooltip(tip)
 }
