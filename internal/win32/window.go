@@ -25,6 +25,7 @@ const (
 	wmLButtonUp       = 0x0202
 	wmRButtonUp       = 0x0205
 	wmContextMenu     = 0x007B
+	wmDpiChanged      = 0x02E0
 	wmTrayIcon        = 0x800A // WM_APP + 10 (avoids go-webview2's WM_APP = 0x8000)
 	wmRestoreApp      = 0x800B // WM_APP + 11 (posted by second instance to restore existing window)
 
@@ -135,6 +136,11 @@ var (
 	procUnhookWindowsHookEx       = user32.NewProc("UnhookWindowsHookEx")
 	procCallNextHookEx            = user32.NewProc("CallNextHookEx")
 	procGetClassNameW             = user32.NewProc("GetClassNameW")
+	procMonitorFromPoint          = user32.NewProc("MonitorFromPoint")
+	procGetMonitorInfoW           = user32.NewProc("GetMonitorInfoW")
+
+	shcore               = windows.NewLazySystemDLL("shcore.dll")
+	procGetDpiForMonitor = shcore.NewProc("GetDpiForMonitor")
 
 	kernel32               = windows.NewLazySystemDLL("kernel32.dll")
 	procGetCurrentThreadId = kernel32.NewProc("GetCurrentThreadId")
@@ -222,15 +228,57 @@ var (
 	startupOrigProc  uintptr
 )
 
-// ComputeInitialWindowRect computes the exact physical window bounds for the given logical
-// client size and saved top-left position (centering on primary work area if unset or offscreen).
-func ComputeInitialWindowRect(savedX, savedY, logicalW, logicalH int) (int32, int32, int32, int32) {
+type monitorInfo struct {
+	CbSize    uint32
+	RcMonitor rect
+	RcWork    rect
+	DwFlags   uint32
+}
+
+func monitorDPIAndWorkArea(savedX, savedY int) (int, rect) {
 	dpi := 96
 	if procGetDpiForSystem.Find() == nil {
 		if d, _, _ := procGetDpiForSystem.Call(); d > 0 {
 			dpi = int(d)
 		}
 	}
+
+	var wa rect
+	procSystemParametersInfoW.Call(48 /* SPI_GETWORKAREA */, 0, uintptr(unsafe.Pointer(&wa)), 0)
+
+	if procMonitorFromPoint.Find() == nil {
+		var hMon uintptr
+		if savedX != -1 || savedY != -1 {
+			ptPacked := uintptr(uint32(int32(savedX))) | (uintptr(uint32(int32(savedY))) << 32)
+			hMon, _, _ = procMonitorFromPoint.Call(ptPacked, 0 /* MONITOR_DEFAULTTONULL */)
+		}
+		if hMon == 0 {
+			hMon, _, _ = procMonitorFromPoint.Call(0, 1 /* MONITOR_DEFAULTTOPRIMARY */)
+		}
+		if hMon != 0 {
+			if procGetDpiForMonitor.Find() == nil {
+				var dpiX, dpiY uint32
+				hr, _, _ := procGetDpiForMonitor.Call(hMon, 0 /* MDT_EFFECTIVE_DPI */, uintptr(unsafe.Pointer(&dpiX)), uintptr(unsafe.Pointer(&dpiY)))
+				if int32(hr) >= 0 && dpiX > 0 {
+					dpi = int(dpiX)
+				}
+			}
+			if procGetMonitorInfoW.Find() == nil {
+				mi := monitorInfo{CbSize: uint32(unsafe.Sizeof(monitorInfo{}))}
+				if ok, _, _ := procGetMonitorInfoW.Call(hMon, uintptr(unsafe.Pointer(&mi))); ok != 0 {
+					wa = mi.RcWork
+				}
+			}
+		}
+	}
+
+	return dpi, wa
+}
+
+// ComputeInitialWindowRect computes the exact physical window bounds for the given logical
+// client size and saved top-left position (centering on primary work area if unset or offscreen).
+func ComputeInitialWindowRect(savedX, savedY, logicalW, logicalH int) (int32, int32, int32, int32) {
+	dpi, wa := monitorDPIAndWorkArea(savedX, savedY)
 	physW := (logicalW*dpi + 48) / 96
 	physH := (logicalH*dpi + 48) / 96
 
@@ -244,9 +292,6 @@ func ComputeInitialWindowRect(savedX, savedY, logicalW, logicalH int) (int32, in
 	}
 	winW := int(r.Right - r.Left)
 	winH := int(r.Bottom - r.Top)
-
-	var wa rect
-	procSystemParametersInfoW.Call(48 /* SPI_GETWORKAREA */, 0, uintptr(unsafe.Pointer(&wa)), 0)
 
 	vx, _, _ := procGetSystemMetrics.Call(76 /* SM_XVIRTUALSCREEN */)
 	vy, _, _ := procGetSystemMetrics.Call(77 /* SM_YVIRTUALSCREEN */)
