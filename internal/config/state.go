@@ -53,6 +53,10 @@ type AppState struct {
 	Muted             bool            `json:"muted"`
 	WindowX           int             `json:"window_x"`
 	WindowY           int             `json:"window_y"`
+	VuStyle           string          `json:"vu_style,omitempty"`
+	EQPreset          string          `json:"eq_preset,omitempty"`
+	PlaybackRate      float64         `json:"playback_rate,omitempty"`
+	RecentSearches    []string        `json:"recent_searches,omitempty"`
 }
 
 // CookieEntry represents a browser cookie captured during Google/YouTube login.
@@ -123,6 +127,10 @@ func DefaultAppState() AppState {
 		Volume:           0.8,
 		WindowX:          -1,
 		WindowY:          -1,
+		VuStyle:          "led",
+		EQPreset:         "flat",
+		PlaybackRate:     1.0,
+		RecentSearches:   []string{},
 	}
 }
 
@@ -240,6 +248,22 @@ func normalizeAppState(s *AppState) {
 	case "dark", "light":
 	default:
 		s.Theme = "dark"
+	}
+	switch s.VuStyle {
+	case "led", "bar":
+	default:
+		s.VuStyle = "led"
+	}
+	switch s.EQPreset {
+	case "flat", "bass", "vocal", "bright":
+	default:
+		s.EQPreset = "flat"
+	}
+	if s.PlaybackRate < 0.5 || s.PlaybackRate > 2.0 {
+		s.PlaybackRate = 1.0
+	}
+	if s.RecentSearches == nil {
+		s.RecentSearches = []string{}
 	}
 	if s.Volume < 0 || s.Volume > 1 {
 		s.Volume = 0.8
@@ -371,6 +395,68 @@ func (s *AppState) RemoveTrackFromPlaylist(name, trackID string) error {
 	}
 	s.SavedPlaylists[idx].Tracks = filtered
 	return nil
+}
+
+// RenamePlaylist renames an existing saved playlist cleanly without colliding with another playlist.
+func (s *AppState) RenamePlaylist(oldName, newName string) error {
+	oldName = strings.TrimSpace(oldName)
+	newName = strings.TrimSpace(newName)
+	if oldName == "" || newName == "" {
+		return fmt.Errorf("playlist name cannot be empty")
+	}
+	idx := s.findSavedPlaylistIndex(oldName)
+	if idx < 0 {
+		return fmt.Errorf("playlist %q not found", oldName)
+	}
+	if conflict := s.findSavedPlaylistIndex(newName); conflict >= 0 && conflict != idx {
+		return fmt.Errorf("playlist %q already exists", newName)
+	}
+	s.SavedPlaylists[idx].Name = newName
+	return nil
+}
+
+// MoveTrackInPlaylist moves a track within a saved playlist from fromIdx to toIdx.
+func (s *AppState) MoveTrackInPlaylist(name string, fromIdx, toIdx int) error {
+	idx := s.findSavedPlaylistIndex(strings.TrimSpace(name))
+	if idx < 0 {
+		return fmt.Errorf("playlist %q not found", name)
+	}
+	tracks := s.SavedPlaylists[idx].Tracks
+	if fromIdx < 0 || fromIdx >= len(tracks) || toIdx < 0 || toIdx >= len(tracks) {
+		return fmt.Errorf("track move indices out of range")
+	}
+	if fromIdx == toIdx {
+		return nil
+	}
+	tr := tracks[fromIdx]
+	tracks = append(tracks[:fromIdx], tracks[fromIdx+1:]...)
+	if toIdx >= len(tracks) {
+		tracks = append(tracks, tr)
+	} else {
+		tracks = append(tracks[:toIdx], append([]Track{tr}, tracks[toIdx:]...)...)
+	}
+	s.SavedPlaylists[idx].Tracks = tracks
+	return nil
+}
+
+// AddRecentSearch records a search query at the front of RecentSearches (case-insensitive dedupe, cap 10).
+func (s *AppState) AddRecentSearch(query string) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return
+	}
+	out := make([]string, 0, 10)
+	out = append(out, query)
+	for _, existing := range s.RecentSearches {
+		if len(out) >= 10 {
+			break
+		}
+		if strings.EqualFold(strings.TrimSpace(existing), query) {
+			continue
+		}
+		out = append(out, existing)
+	}
+	s.RecentSearches = out
 }
 
 // SaveAppState saves state.json atomically to %APPDATA%\ytmusic\state.json.
