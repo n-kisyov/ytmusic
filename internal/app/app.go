@@ -39,6 +39,8 @@ type readyPayload struct {
 type searchPayload struct {
 	Playlist          []config.Track `json:"playlist"`
 	ContinuationToken string         `json:"continuation_token"`
+	Label             string         `json:"label,omitempty"`
+	RecentSearches    []string       `json:"recent_searches,omitempty"`
 }
 
 type loadMorePayload struct {
@@ -47,18 +49,19 @@ type loadMorePayload struct {
 
 // App coordinates the UI WebView2 window, Win32 shell/tray, YouTube client, and stream proxy.
 type App struct {
-	mu           sync.Mutex
-	state        config.AppState
-	authState    config.AuthState
-	ytClient     *youtube.Client
-	resolver     *player.Resolver
-	server       *player.Server
-	wv           webview2.WebView
-	winCtrl      *win32.Controller
-	authRunning  bool
-	exited       bool
-	sleepMinutes int
-	sleepTimer   *time.Timer
+	mu            sync.Mutex
+	state         config.AppState
+	authState     config.AuthState
+	ytClient      *youtube.Client
+	resolver      *player.Resolver
+	server        *player.Server
+	wv            webview2.WebView
+	winCtrl       *win32.Controller
+	authRunning   bool
+	exited        bool
+	sleepMinutes  int
+	sleepDeadline time.Time
+	sleepTimer    *time.Timer
 }
 
 // New initializes application state, YouTube client, stream resolver, and local UI/stream server.
@@ -267,8 +270,8 @@ func (a *App) Run(debug bool) error {
 		},
 	})
 
-	a.winCtrl.SetClientSize(fixedWidth, initialH, false)
 	a.winCtrl.SetWindowPosition(savedX, savedY)
+	a.winCtrl.SetClientSize(fixedWidth, initialH, false)
 	a.winCtrl.SetAlwaysOnTop(initialAlwaysOnTop)
 	a.winCtrl.SetDarkMode(initialTheme != "light")
 
@@ -355,13 +358,68 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 		defer cancel()
 
-		res, err := a.ytClient.SearchInitialPlaylist(ctx, query, initialTracks)
+		var (
+			res   youtube.SearchResult
+			label string
+			err   error
+		)
+		if _, _, isURL := youtube.ParseYouTubeInput(query); isURL {
+			res, label, err = a.ytClient.ResolveURLPlaylist(ctx, query, initialTracks)
+		} else {
+			res, err = a.ytClient.SearchInitialPlaylist(ctx, query, initialTracks)
+		}
 		if err != nil {
 			return searchPayload{}, err
 		}
 
 		a.mu.Lock()
 		a.state.SearchQuery = query
+		if _, _, isURL := youtube.ParseYouTubeInput(query); !isURL {
+			a.state.AddRecentSearch(query)
+		}
+		a.state.Playlist = append([]config.Track(nil), res.Tracks...)
+		a.state.Overflow = a.ytClient.GetOverflow()
+		a.state.ContinuationToken = res.ContinuationToken
+		a.state.PositionSec = 0
+		if len(a.state.Playlist) > 0 {
+			a.state.CurrentIndex = 0
+			a.state.CurrentTrackID = a.state.Playlist[0].ID
+			a.state.WasPlaying = true
+		} else {
+			a.state.CurrentIndex = -1
+			a.state.CurrentTrackID = ""
+			a.state.WasPlaying = false
+		}
+		recent := append([]string(nil), a.state.RecentSearches...)
+		snapshot := a.cloneStateLocked()
+		a.updateTrayTitleLocked()
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+
+		return searchPayload{
+			Playlist:          res.Tracks,
+			ContinuationToken: res.ContinuationToken,
+			Label:             label,
+			RecentSearches:    recent,
+		}, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendStartRadio", func(seedTrack config.Track) (searchPayload, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+
+		res, err := a.ytClient.StartRadioMix(ctx, seedTrack.ID, &seedTrack, initialTracks)
+		if err != nil {
+			return searchPayload{}, err
+		}
+
+		a.mu.Lock()
+		if seedTrack.Title != "" {
+			a.state.SearchQuery = "Mix: " + seedTrack.Title
+		}
 		a.state.Playlist = append([]config.Track(nil), res.Tracks...)
 		a.state.Overflow = a.ytClient.GetOverflow()
 		a.state.ContinuationToken = res.ContinuationToken
@@ -384,7 +442,35 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		return searchPayload{
 			Playlist:          res.Tracks,
 			ContinuationToken: res.ContinuationToken,
+			Label:             fmt.Sprintf("Radio Mix (%d songs)", len(res.Tracks)),
 		}, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendSearchSuggest", func(query string) ([]string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		return a.ytClient.SuggestQueries(ctx, query)
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendRemoveRecentSearch", func(query string) ([]string, error) {
+		a.mu.Lock()
+		filtered := make([]string, 0, len(a.state.RecentSearches))
+		for _, item := range a.state.RecentSearches {
+			if !strings.EqualFold(strings.TrimSpace(item), strings.TrimSpace(query)) {
+				filtered = append(filtered, item)
+			}
+		}
+		a.state.RecentSearches = filtered
+		out := append([]string(nil), filtered...)
+		snapshot := a.cloneStateLocked()
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return out, nil
 	}); err != nil {
 		return err
 	}
@@ -612,7 +698,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		return err
 	}
 
-	if err := w.Bind("backendSavePlaylist", func(name string) ([]config.SavedPlaylist, error) {
+	if err := w.Bind("backendSavePlaylist", func(name string, mode string) ([]config.SavedPlaylist, error) {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			return nil, fmt.Errorf("playlist name cannot be empty")
@@ -622,22 +708,30 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			a.mu.Unlock()
 			return nil, fmt.Errorf("current queue is empty")
 		}
-		sp := config.SavedPlaylist{
-			Name:      name,
-			Query:     a.state.SearchQuery,
-			Tracks:    append([]config.Track(nil), a.state.Playlist...),
-			CreatedAt: time.Now().Unix(),
-		}
-		replaced := false
+		existingIdx := -1
 		for i, existing := range a.state.SavedPlaylists {
 			if strings.EqualFold(existing.Name, name) {
-				a.state.SavedPlaylists[i] = sp
-				replaced = true
+				existingIdx = i
 				break
 			}
 		}
-		if !replaced {
-			a.state.SavedPlaylists = append([]config.SavedPlaylist{sp}, a.state.SavedPlaylists...)
+		if existingIdx >= 0 && mode == "merge" {
+			if err := a.state.CreatePlaylist(name, a.state.Playlist); err != nil {
+				a.mu.Unlock()
+				return nil, err
+			}
+		} else {
+			sp := config.SavedPlaylist{
+				Name:      name,
+				Query:     a.state.SearchQuery,
+				Tracks:    append([]config.Track(nil), a.state.Playlist...),
+				CreatedAt: time.Now().Unix(),
+			}
+			if existingIdx >= 0 {
+				a.state.SavedPlaylists[existingIdx] = sp
+			} else {
+				a.state.SavedPlaylists = append([]config.SavedPlaylist{sp}, a.state.SavedPlaylists...)
+			}
 		}
 		out := append([]config.SavedPlaylist(nil), a.state.SavedPlaylists...)
 		snapshot := a.cloneStateLocked()
@@ -645,6 +739,34 @@ func (a *App) bindMethods(w webview2.WebView) error {
 
 		_ = config.SaveAppState(snapshot)
 		return out, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendLoadLikedPlaylist", func() (searchPayload, error) {
+		a.mu.Lock()
+		a.ytClient.ClearOverflow()
+		a.state.Overflow = nil
+		a.state.ContinuationToken = ""
+		a.state.SearchQuery = ""
+		a.state.Playlist = append([]config.Track(nil), a.state.LikedTracks...)
+		a.state.PositionSec = 0
+		if len(a.state.Playlist) > 0 {
+			a.state.CurrentIndex = 0
+			a.state.CurrentTrackID = a.state.Playlist[0].ID
+			a.state.WasPlaying = true
+		} else {
+			a.state.CurrentIndex = -1
+			a.state.CurrentTrackID = ""
+			a.state.WasPlaying = false
+		}
+		a.updateTrayTitleLocked()
+		tracks := append([]config.Track(nil), a.state.Playlist...)
+		snapshot := a.cloneStateLocked()
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return searchPayload{Playlist: tracks}, nil
 	}); err != nil {
 		return err
 	}
@@ -751,6 +873,74 @@ func (a *App) bindMethods(w webview2.WebView) error {
 
 		_ = config.SaveAppState(snapshot)
 		return out, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendRenamePlaylist", func(oldName, newName string) ([]config.SavedPlaylist, error) {
+		a.mu.Lock()
+		if err := a.state.RenamePlaylist(oldName, newName); err != nil {
+			a.mu.Unlock()
+			return nil, err
+		}
+		snapshot := a.cloneStateLocked()
+		out := append([]config.SavedPlaylist(nil), snapshot.SavedPlaylists...)
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return out, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendMovePlaylistTrack", func(name string, fromIdx, toIdx int) ([]config.SavedPlaylist, error) {
+		a.mu.Lock()
+		if err := a.state.MoveTrackInPlaylist(name, fromIdx, toIdx); err != nil {
+			a.mu.Unlock()
+			return nil, err
+		}
+		snapshot := a.cloneStateLocked()
+		out := append([]config.SavedPlaylist(nil), snapshot.SavedPlaylists...)
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return out, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendSetAudioPrefs", func(vuStyle, eqPreset string, playbackRate float64) error {
+		a.mu.Lock()
+		if vuStyle != "" {
+			a.state.VuStyle = vuStyle
+		}
+		if eqPreset != "" {
+			a.state.EQPreset = eqPreset
+		}
+		if playbackRate >= 0.5 && playbackRate <= 2.0 {
+			a.state.PlaybackRate = playbackRate
+		}
+		snapshot := a.cloneStateLocked()
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendSetSleepTimer", func(minutes int) (int64, error) {
+		a.setSleepTimer(minutes)
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if a.sleepDeadline.IsZero() {
+			return 0, nil
+		}
+		rem := int64(time.Until(a.sleepDeadline).Seconds())
+		if rem < 0 {
+			rem = 0
+		}
+		return rem, nil
 	}); err != nil {
 		return err
 	}
@@ -907,9 +1097,12 @@ func (a *App) setSleepTimer(minutes int) {
 		a.sleepTimer = nil
 	}
 	a.sleepMinutes = minutes
+	var remainingSec int64
 	wv := a.wv
 	if minutes > 0 {
 		duration := time.Duration(minutes) * time.Minute
+		a.sleepDeadline = time.Now().Add(duration)
+		remainingSec = int64(duration.Seconds())
 		var timer *time.Timer
 		timer = time.AfterFunc(duration, func() {
 			a.mu.Lock()
@@ -918,16 +1111,20 @@ func (a *App) setSleepTimer(minutes int) {
 				return
 			}
 			a.sleepMinutes = 0
+			a.sleepDeadline = time.Time{}
 			a.sleepTimer = nil
 			w := a.wv
 			a.mu.Unlock()
 			if w != nil {
 				w.Dispatch(func() {
+					w.Eval("window.__onSleepTimerChanged && window.__onSleepTimerChanged(0)")
 					w.Eval("window.__trayCommand && window.__trayCommand('pause_sleep')")
 				})
 			}
 		})
 		a.sleepTimer = timer
+	} else {
+		a.sleepDeadline = time.Time{}
 	}
 	a.mu.Unlock()
 
@@ -938,6 +1135,7 @@ func (a *App) setSleepTimer(minutes int) {
 		}
 		rawMsg, _ := json.Marshal(msg)
 		wv.Dispatch(func() {
+			wv.Eval(fmt.Sprintf("window.__onSleepTimerChanged && window.__onSleepTimerChanged(%d)", remainingSec))
 			wv.Eval("window.__showToast && window.__showToast(" + string(rawMsg) + ")")
 		})
 	}
@@ -993,6 +1191,7 @@ func (a *App) cloneStateLocked() config.AppState {
 	cp.Playlist = append([]config.Track(nil), a.state.Playlist...)
 	cp.Overflow = append([]config.Track(nil), a.state.Overflow...)
 	cp.LikedTracks = append([]config.Track(nil), a.state.LikedTracks...)
+	cp.RecentSearches = append([]string(nil), a.state.RecentSearches...)
 	cp.SavedPlaylists = make([]config.SavedPlaylist, len(a.state.SavedPlaylists))
 	for i, sp := range a.state.SavedPlaylists {
 		cp.SavedPlaylists[i] = sp
