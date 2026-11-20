@@ -229,19 +229,33 @@ func (c *Controller) stepTrayAnimation() {
 		if completedMode == trayAnimMinimize {
 			procShowWindow.Call(c.hwnd, swHide)
 			c.hidden = true
-			// Snap back to saved position while hidden so next restore starts cleanly.
+			// Snap back to saved position & any pending size while hidden so next restore starts cleanly.
+			w := c.savedRect.Right - c.savedRect.Left
+			h := c.savedRect.Bottom - c.savedRect.Top
+			flags := uintptr(swpNoZOrder | swpNoActivate)
+			if w <= 80 || h <= 80 {
+				flags |= swpNoSize
+				w, h = 0, 0
+			}
 			procSetWindowPos.Call(
 				c.hwnd, 0,
 				uintptr(c.savedRect.Left), uintptr(c.savedRect.Top),
-				0, 0,
-				swpNoSize|swpNoZOrder|swpNoActivate,
+				uintptr(w), uintptr(h),
+				flags,
 			)
 		} else {
+			w := c.savedRect.Right - c.savedRect.Left
+			h := c.savedRect.Bottom - c.savedRect.Top
+			flags := uintptr(swpNoZOrder)
+			if w <= 80 || h <= 80 {
+				flags |= swpNoSize
+				w, h = 0, 0
+			}
 			procSetWindowPos.Call(
 				c.hwnd, 0,
 				uintptr(c.savedRect.Left), uintptr(c.savedRect.Top),
-				0, 0,
-				swpNoSize|swpNoZOrder,
+				uintptr(w), uintptr(h),
+				flags,
 			)
 			procSetForegroundWindow.Call(c.hwnd)
 			c.SetAlwaysOnTop(c.alwaysOnTop)
