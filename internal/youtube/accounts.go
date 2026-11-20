@@ -10,13 +10,14 @@ import (
 
 // AccountProfile contains the active YouTube channel identity and all linked Brand Accounts.
 type AccountProfile struct {
-	AccountName   string
-	ChannelHandle string
-	Email         string
-	AvatarURL     string
-	ActivePageID  string
-	AuthUser      string
-	Accounts      []config.BrandAccount
+	AccountName    string
+	ChannelHandle  string
+	Email          string
+	AvatarURL      string
+	ActivePageID   string
+	AuthUser       string
+	SessionExpired bool
+	Accounts       []config.BrandAccount
 }
 
 // FetchAccountProfile queries InnerTube account/account_menu and account/accounts_list
@@ -41,7 +42,11 @@ func (c *Client) FetchAccountProfile(ctx context.Context) (AccountProfile, error
 		"userInterfaceTheme": "USER_INTERFACE_THEME_DARK",
 	})
 	if err == nil {
-		parseActiveAccountHeader(menuResp, &profile)
+		if isLoggedOutResponse(menuResp) {
+			profile.SessionExpired = true
+		} else {
+			parseActiveAccountHeader(menuResp, &profile)
+		}
 	} else {
 		menuErr = err
 	}
@@ -55,14 +60,30 @@ func (c *Client) FetchAccountProfile(ctx context.Context) (AccountProfile, error
 	if listErr == nil {
 		accounts := parseAccountsList(listResp, profile.Email)
 		if len(accounts) > 0 {
-			markAndMergeAccounts(accounts, &profile)
+			markAndMergeAccounts(accounts, &profile, auth.LoggedIn)
+		} else if profile.AccountName == "" && isLoggedOutResponse(listResp) {
+			profile.SessionExpired = true
 		}
 	}
 
-	if profile.AccountName == "" && menuErr != nil && listErr != nil {
+	if profile.AccountName == "" && !profile.SessionExpired && menuErr != nil && listErr != nil {
 		return profile, listErr
 	}
 	return profile, nil
+}
+
+func isLoggedOutResponse(root map[string]any) bool {
+	if len(root) == 0 {
+		return false
+	}
+	if rc, ok := root["responseContext"].(map[string]any); ok {
+		if mainCtx, ok := rc["mainAppWebResponseContext"].(map[string]any); ok {
+			if loggedOut, ok := mainCtx["loggedOut"].(bool); ok && loggedOut {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func parseActiveAccountHeader(root any, out *AccountProfile) {
@@ -212,20 +233,24 @@ func extractIdentityTokens(m map[string]any) (pageID, authUser string) {
 	return pageID, authUser
 }
 
-func markAndMergeAccounts(accounts []config.BrandAccount, profile *AccountProfile) {
+func markAndMergeAccounts(accounts []config.BrandAccount, profile *AccountProfile, forcePageIDMatch bool) {
 	selectedIdx := -1
 	ownerEmail := profile.Email
 	for i := range accounts {
 		if ownerEmail == "" && accounts[i].Email != "" {
 			ownerEmail = accounts[i].Email
 		}
-		if profile.ActivePageID != "" {
+		if profile.ActivePageID != "" || forcePageIDMatch {
 			accounts[i].Selected = accounts[i].PageID == profile.ActivePageID
 			if accounts[i].Selected && selectedIdx < 0 {
 				selectedIdx = i
 			}
-		} else if accounts[i].Selected && selectedIdx < 0 {
-			selectedIdx = i
+		} else {
+			if accounts[i].Selected && selectedIdx < 0 {
+				selectedIdx = i
+			} else {
+				accounts[i].Selected = false
+			}
 		}
 	}
 
@@ -253,16 +278,18 @@ func markAndMergeAccounts(accounts []config.BrandAccount, profile *AccountProfil
 
 	if selectedIdx >= 0 {
 		sel := accounts[selectedIdx]
-		if profile.AccountName == "" {
-			profile.AccountName = sel.Name
+		if profile.AccountName == "" || forcePageIDMatch {
+			if sel.Name != "" {
+				profile.AccountName = sel.Name
+			}
 		}
-		if profile.ChannelHandle == "" {
+		if profile.ChannelHandle == "" || forcePageIDMatch {
 			profile.ChannelHandle = sel.Handle
 		}
-		if profile.AvatarURL == "" {
+		if (profile.AvatarURL == "" || forcePageIDMatch) && sel.AvatarURL != "" {
 			profile.AvatarURL = sel.AvatarURL
 		}
-		if profile.ActivePageID == "" {
+		if profile.ActivePageID == "" && !forcePageIDMatch {
 			profile.ActivePageID = sel.PageID
 		}
 		if sel.AuthUser != "" {

@@ -22,6 +22,7 @@ import (
 const (
 	streamCacheTTL    = 90 * time.Minute
 	androidUserAgent  = "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip"
+	iosUserAgent      = "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)"
 	desktopChromeUA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
@@ -193,8 +194,8 @@ func FindYtDlp() string {
 func (r *Resolver) resolveWithYtDlp(ctx context.Context, bin, videoID string) (ResolvedStream, error) {
 	args := []string{
 		"-g",
-		"-f", "18/best[ext=mp4][acodec!=none][vcodec!=none]/best[acodec!=none]",
-		"--extractor-args", "youtube:player_client=android,web_safari",
+		"-f", "18/best[ext=mp4][acodec!=none][vcodec!=none][protocol!=m3u8_native][protocol!=m3u8]/best[acodec!=none][protocol!=m3u8_native][protocol!=m3u8]",
+		"--extractor-args", "youtube:player_client=android,web",
 		"--no-playlist",
 		"--no-warnings",
 		"--socket-timeout", "10",
@@ -226,15 +227,22 @@ func (r *Resolver) resolveWithYtDlp(ctx context.Context, bin, videoID string) (R
 
 	for _, line := range strings.Split(stdout.String(), "\n") {
 		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "http://") || strings.HasPrefix(line, "https://") {
-			ua := desktopChromeUA
-			if strings.Contains(line, "c=ANDROID") {
-				ua = androidUserAgent
-			}
-			return ResolvedStream{URL: line, UserAgent: ua}, nil
+		if !strings.HasPrefix(line, "http://") && !strings.HasPrefix(line, "https://") {
+			continue
 		}
+		lower := strings.ToLower(line)
+		if strings.Contains(lower, ".m3u8") || strings.Contains(lower, "manifest/hls") {
+			continue
+		}
+		ua := desktopChromeUA
+		if strings.Contains(line, "c=ANDROID") {
+			ua = androidUserAgent
+		} else if strings.Contains(line, "c=IOS") {
+			ua = iosUserAgent
+		}
+		return ResolvedStream{URL: line, UserAgent: ua}, nil
 	}
-	return ResolvedStream{}, errors.New("yt-dlp returned no stream URL")
+	return ResolvedStream{}, errors.New("yt-dlp returned no progressive stream URL")
 }
 
 func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (ResolvedStream, error) {
@@ -268,9 +276,13 @@ func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (Re
 				"gl":               "US",
 				"utcOffsetMinutes": 0,
 			},
-			userAgent: "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)",
+			userAgent: iosUserAgent,
 		},
 	}
+
+	r.mu.Lock()
+	loggedIn := r.auth.LoggedIn
+	r.mu.Unlock()
 
 	var lastErr error
 	for _, cl := range clients {
@@ -305,6 +317,10 @@ func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (Re
 		}
 
 		var data struct {
+			PlayabilityStatus struct {
+				Status string `json:"status"`
+				Reason string `json:"reason"`
+			} `json:"playabilityStatus"`
 			StreamingData struct {
 				Formats []struct {
 					Itag          int    `json:"itag"`
@@ -321,6 +337,16 @@ func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (Re
 		}
 		if err := json.Unmarshal(respBytes, &data); err != nil {
 			lastErr = err
+			continue
+		}
+
+		status := strings.ToUpper(strings.TrimSpace(data.PlayabilityStatus.Status))
+		if status != "" && status != "OK" {
+			lastErr = fmt.Errorf("playability %s: %s", status, strings.TrimSpace(data.PlayabilityStatus.Reason))
+			if status == "LOGIN_REQUIRED" && loggedIn {
+				// Let authenticated yt-dlp --cookies handle account-gated tracks immediately.
+				break
+			}
 			continue
 		}
 
