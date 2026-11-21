@@ -312,4 +312,15 @@ func TestAppStateRenameMoveAndAudioPrefs(t *testing.T) {
 	if loaded.VuStyle != "bar" || loaded.EQPreset != "bass" || loaded.PlaybackRate != 1.25 || loaded.TotalPlayTimeSec != 3725 || len(loaded.RecentSearches) != 2 {
 		t.Fatalf("loaded new prefs mismatch: %+v", loaded)
 	}
+
+	if err := ResetPlayTimeStatsFrom(path); err != nil {
+		t.Fatalf("ResetPlayTimeStatsFrom failed: %v", err)
+	}
+	afterReset, err := LoadAppStateFrom(path)
+	if err != nil {
+		t.Fatalf("LoadAppStateFrom after reset failed: %v", err)
+	}
+	if afterReset.TotalPlayTimeSec != 0 || afterReset.EQPreset != "bass" {
+		t.Fatalf("expected TotalPlayTimeSec=0 with other prefs preserved, got %+v", afterReset)
+	}
 }

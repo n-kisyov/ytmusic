@@ -884,29 +884,7 @@
     if (clearQueueBtn) {
       clearQueueBtn.classList.toggle('hidden', state.activeTab !== 'queue' || state.playlist.length === 0);
     }
-    if (clearQueueBtn) {
-    clearQueueBtn.addEventListener('click', async () => {
-      if (state.playlist.length === 0) return;
-      closeAddToPlaylistPopover();
-      state.playlist = [];
-      state.shuffleHistory = [];
-      state.shuffleBag = [];
-      state.currentIndex = -1;
-      state.userInitiatedPlay = false;
-      clearErrorSkipTimer();
-      stopPlaytimeTracker();
-      videoLoading.classList.add('hidden');
-      media.pause();
-      media.removeAttribute('src');
-      media.load();
-      updatePlayButtonUI();
-      renderActiveDrawerView(false);
-      await window.backendUpdatePlaylist([], -1).catch(() => {});
-      showToast('Queue cleared');
-    });
-  }
-
-  if (appendCollectionBtn) {
+    if (appendCollectionBtn) {
       appendCollectionBtn.classList.toggle('hidden', !canPlayCollection);
     }
     saveQueueBtn.classList.remove('hidden');
@@ -1243,6 +1221,7 @@
       }
       state.playlist = res.playlist;
       state.shuffleHistory = [];
+      state.shuffleBag = [];
       state.consecutiveErrors = 0;
       state.currentIndex = 0;
       state.activeTab = 'queue';
@@ -1356,6 +1335,7 @@
           if (!res || !Array.isArray(res.playlist) || res.playlist.length === 0) return;
           state.playlist = res.playlist;
           state.shuffleHistory = [];
+      state.shuffleBag = [];
           state.currentIndex = 0;
           state.activeTab = 'queue';
           searchInput.value = sp.query || '';
@@ -1916,6 +1896,7 @@
         state.recentSearches = res.recent_searches;
       }
       state.shuffleHistory = [];
+      state.shuffleBag = [];
       state.consecutiveErrors = 0;
       state.currentIndex = 0;
       state.activeTab = 'queue';
@@ -2241,6 +2222,7 @@
         if (!res || !Array.isArray(res.playlist) || res.playlist.length === 0) return;
         state.playlist = res.playlist;
         state.shuffleHistory = [];
+      state.shuffleBag = [];
         state.currentIndex = 0;
         state.activeTab = 'queue';
         searchInput.value = sp.query || '';
@@ -2259,6 +2241,7 @@
       if (!res || !Array.isArray(res.playlist) || res.playlist.length === 0) return;
       state.playlist = res.playlist;
       state.shuffleHistory = [];
+      state.shuffleBag = [];
       state.currentIndex = 0;
       state.activeTab = 'queue';
       searchInput.value = '';
@@ -2276,6 +2259,7 @@
       closeAddToPlaylistPopover();
       state.playlist = [];
       state.shuffleHistory = [];
+      state.shuffleBag = [];
       state.shuffleBag = [];
       state.currentIndex = -1;
       state.userInitiatedPlay = false;
