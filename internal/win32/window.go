@@ -449,6 +449,7 @@ func startupCBTHookProc(nCode int32, wParam uintptr, lParam unsafe.Pointer) uint
 				cbt.Lpcs.Y = initRect.Top
 				cbt.Lpcs.Cx = initRect.Right - initRect.Left
 				cbt.Lpcs.Cy = initRect.Bottom - initRect.Top
+				cbt.Lpcs.Style &^= int32(wsCaption | wsThickFrame | wsMaximizeBox)
 
 				style := getWindowLongPtr(wParam, gwlStyle)
 				setWindowLongPtr(wParam, gwlStyle, style&^(wsCaption|wsThickFrame|wsMaximizeBox))
