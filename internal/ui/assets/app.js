@@ -2887,7 +2887,10 @@
         media.playbackRate = state.playbackRate;
         media.load();
         if (s.was_playing) {
-          media.play().catch(() => updatePlayButtonUI());
+          media.play().catch(() => {
+            state.userInitiatedPlay = false;
+            updatePlayButtonUI();
+          });
         } else {
           updatePlayButtonUI();
         }
