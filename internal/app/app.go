@@ -276,6 +276,15 @@ func (a *App) Run(debug bool) error {
 		OnExit: func() {
 			a.quit()
 		},
+		OnSystemSuspend: func() {
+			a.handleSystemSuspend(w)
+		},
+		OnSystemResume: func() {
+			a.handleSystemResume(w)
+		},
+		OnResetStats: func() {
+			a.ResetPlayTimeStats()
+		},
 	})
 
 	a.winCtrl.SetWindowPosition(savedX, savedY)
@@ -983,6 +992,12 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			a.sessionPlaySec = sessionPlaySec
 			a.state.TotalPlayTimeSec = a.baseTotalPlaySec + int64(a.sessionPlaySec)
 		}
+		a.playActive = isPlaying
+		if isPlaying {
+			a.playAnchorTime = time.Now()
+		} else {
+			a.playAnchorTime = time.Time{}
+		}
 		curSessSec := int64(a.sessionPlaySec)
 		if curSessSec != a.lastTrayPlaySec {
 			a.lastTrayPlaySec = curSessSec
@@ -1110,6 +1125,12 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		return err
 	}
 
+	if err := w.Bind("backendOpenExternal", func(rawURL string) error {
+		return win32.OpenExternalURL(rawURL)
+	}); err != nil {
+		return err
+	}
+
 	if err := w.Bind("backendQuitApp", func() error {
 		w.Dispatch(func() {
 			a.quit()
@@ -1189,6 +1210,74 @@ func (a *App) quit() {
 	}
 }
 
+func (a *App) creditTrailingPlayTimeLocked() {
+	if !a.playActive || a.playAnchorTime.IsZero() {
+		return
+	}
+	now := time.Now()
+	delta := now.Sub(a.playAnchorTime).Seconds()
+	if delta > 0 && delta < 3600 {
+		a.sessionPlaySec += delta
+		a.state.TotalPlayTimeSec = a.baseTotalPlaySec + int64(a.sessionPlaySec)
+	}
+	a.playAnchorTime = now
+}
+
+func (a *App) handleSystemSuspend(w webview2.WebView) {
+	a.mu.Lock()
+	a.creditTrailingPlayTimeLocked()
+	a.playActive = false
+	a.playAnchorTime = time.Time{}
+	a.updateTrayTitleLocked()
+	snapshot := a.cloneStateLocked()
+	a.mu.Unlock()
+
+	_ = config.SaveAppState(snapshot)
+	if w != nil {
+		w.Dispatch(func() {
+			w.Eval("window.__trayCommand && window.__trayCommand('system_suspend')")
+		})
+	}
+}
+
+func (a *App) handleSystemResume(w webview2.WebView) {
+	a.mu.Lock()
+	if a.playActive {
+		a.playAnchorTime = time.Now()
+	}
+	a.mu.Unlock()
+	if w != nil {
+		w.Dispatch(func() {
+			w.Eval("window.__trayCommand && window.__trayCommand('system_resume')")
+		})
+	}
+}
+
+// ResetPlayTimeStats clears both session and all-time listening counters cleanly.
+func (a *App) ResetPlayTimeStats() {
+	a.mu.Lock()
+	a.baseTotalPlaySec = 0
+	a.sessionPlaySec = 0
+	a.lastTrayPlaySec = -1
+	if a.playActive {
+		a.playAnchorTime = time.Now()
+	} else {
+		a.playAnchorTime = time.Time{}
+	}
+	a.state.TotalPlayTimeSec = 0
+	a.updateTrayTitleLocked()
+	snapshot := a.cloneStateLocked()
+	w := a.wv
+	a.mu.Unlock()
+
+	_ = config.SaveAppState(snapshot)
+	if w != nil {
+		w.Dispatch(func() {
+			w.Eval("window.__onStatsReset && window.__onStatsReset()")
+		})
+	}
+}
+
 func (a *App) saveFinalState() {
 	a.mu.Lock()
 	if a.exited {
@@ -1196,6 +1285,8 @@ func (a *App) saveFinalState() {
 		return
 	}
 	a.exited = true
+	a.creditTrailingPlayTimeLocked()
+	a.updateTrayTitleLocked()
 	if a.winCtrl != nil {
 		x, y := a.winCtrl.GetWindowPosition()
 		a.state.WindowX = x
