@@ -3,11 +3,13 @@ package player
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -75,6 +77,18 @@ func (s *Server) StreamURL(videoID string) string {
 	return s.baseURL + "/stream?id=" + url.QueryEscape(videoID)
 }
 
+// StreamVariantURL returns the local proxy URL for a specific media kind ("audio"|"video") and quality height.
+func (s *Server) StreamVariantURL(videoID, kind string, quality int) string {
+	u := s.baseURL + "/stream?id=" + url.QueryEscape(videoID)
+	if kind != "" {
+		u += "&kind=" + url.QueryEscape(kind)
+	}
+	if quality > 0 {
+		u += fmt.Sprintf("&q=%d", quality)
+	}
+	return u
+}
+
 // Close shuts down the local HTTP server gracefully.
 func (s *Server) Close() error {
 	if s.httpServer == nil {
@@ -96,11 +110,13 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing id", http.StatusBadRequest)
 		return
 	}
+	kind := strings.TrimSpace(r.URL.Query().Get("kind"))
+	quality, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("q")))
 
 	var resp *http.Response
 	var err error
 	for attempt := 0; attempt < 2; attempt++ {
-		resolved, resolveErr := s.resolver.ResolveStream(r.Context(), videoID)
+		resolved, resolveErr := s.resolver.ResolveStreamVariant(r.Context(), videoID, kind, quality)
 		if resolveErr != nil {
 			http.Error(w, "failed to resolve stream: "+resolveErr.Error(), http.StatusBadGateway)
 			return

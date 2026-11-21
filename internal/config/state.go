@@ -56,6 +56,7 @@ type AppState struct {
 	VuStyle           string          `json:"vu_style,omitempty"`
 	EQPreset          string          `json:"eq_preset,omitempty"`
 	PlaybackRate      float64         `json:"playback_rate,omitempty"`
+	VideoQuality      int             `json:"video_quality,omitempty"`
 	RecentSearches    []string        `json:"recent_searches,omitempty"`
 	TotalPlayTimeSec  int64           `json:"total_play_time_sec,omitempty"`
 }
@@ -131,6 +132,7 @@ func DefaultAppState() AppState {
 		VuStyle:          "led",
 		EQPreset:         "flat",
 		PlaybackRate:     1.0,
+		VideoQuality:     720,
 		RecentSearches:   []string{},
 	}
 }
@@ -262,6 +264,11 @@ func normalizeAppState(s *AppState) {
 	}
 	if s.PlaybackRate < 0.5 || s.PlaybackRate > 2.0 {
 		s.PlaybackRate = 1.0
+	}
+	switch s.VideoQuality {
+	case 144, 240, 360, 480, 720, 1080, 1440, 2160:
+	default:
+		s.VideoQuality = 720
 	}
 	if s.RecentSearches == nil {
 		s.RecentSearches = []string{}
