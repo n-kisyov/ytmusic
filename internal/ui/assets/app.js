@@ -2969,9 +2969,18 @@
       case 'prev':
         playPrev();
         break;
-      case 'toggle_video':
-        applyVideoModeUI(!state.videoEnabled);
+      case 'toggle_video': {
+        const nextV = !state.videoEnabled;
+        applyVideoModeUI(nextV);
+        if (typeof window.backendGetCurrentStreamInfo === 'function' && state.currentIndex >= 0) {
+          window.backendGetCurrentStreamInfo().then((updated) => {
+            if (updated) {
+              applyStreamSelection(updated, !media.paused && !media.ended, media.currentTime || 0, true);
+            }
+          }).catch(() => {});
+        }
         break;
+      }
       case 'toggle_always_on_top':
         applyAlwaysOnTopUI(!state.alwaysOnTop);
         break;
