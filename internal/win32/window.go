@@ -411,6 +411,10 @@ func startupPreShowWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 
 	if hwnd == target {
 		switch msg {
+		case wmNcCalcSize:
+			if wParam != 0 {
+				return 0
+			}
 		case wmShowWindow, wmWindowPosChanging:
 			exStyle := getWindowLongPtr(hwnd, gwlExStyle)
 			if (exStyle & wsExLayered) == 0 {
