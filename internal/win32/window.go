@@ -158,6 +158,7 @@ var (
 	procGetMonitorInfoW           = user32.NewProc("GetMonitorInfoW")
 	procIsIconic                  = user32.NewProc("IsIconic")
 	procDefWindowProcW            = user32.NewProc("DefWindowProcW")
+	procReleaseCapture            = user32.NewProc("ReleaseCapture")
 
 	shcore               = windows.NewLazySystemDLL("shcore.dll")
 	procGetDpiForMonitor = shcore.NewProc("GetDpiForMonitor")
@@ -169,8 +170,9 @@ var (
 	procTimeBeginPeriod = winmm.NewProc("timeBeginPeriod")
 	procTimeEndPeriod   = winmm.NewProc("timeEndPeriod")
 
-	dwmapi                    = windows.NewLazySystemDLL("dwmapi.dll")
-	procDwmSetWindowAttribute = dwmapi.NewProc("DwmSetWindowAttribute")
+	dwmapi                           = windows.NewLazySystemDLL("dwmapi.dll")
+	procDwmSetWindowAttribute        = dwmapi.NewProc("DwmSetWindowAttribute")
+	procDwmExtendFrameIntoClientArea = dwmapi.NewProc("DwmExtendFrameIntoClientArea")
 
 	procCreateSolidBrush = gdi32.NewProc("CreateSolidBrush")
 
