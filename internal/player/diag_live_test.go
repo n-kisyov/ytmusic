@@ -20,38 +20,33 @@ func TestDiagLiveStreams(t *testing.T) {
 		t.Fatal(err)
 	}
 	sel := SelectStreams(cat, true, 720)
-	for _, rng := range []string{
-		"bytes=0-262143",
-		"bytes=0-524287",
-		"bytes=0-1048575",
-		"bytes=0-4410720",
-		"bytes=524288-1048575",
-		"bytes=4000000-4410720",
-	} {
-		testURL2(ctx, r.httpClient, "IT-A", sel.AudioURL, sel.AudioUserAgent, rng)
+	// Test video itag 136 beyond 2MB
+	for _, rng := range []string{"bytes=1500000-2000000", "bytes=2097152-2621439", "bytes=5000000-5500000"} {
+		testURL2(ctx, r.httpClient, "IT-V-136", sel.VideoURL, sel.VideoUserAgent, rng)
 	}
-	for _, rng := range []string{
-		"bytes=0-524287",
-		"bytes=0-1048575",
-		"bytes=0-2097151",
-		"bytes=524288-1048575",
-		"bytes=22000000-22404755",
-	} {
-		testURL2(ctx, r.httpClient, "IT-V", sel.VideoURL, sel.VideoUserAgent, rng)
+	// Test FULL progressive itag 18 download size / tail
+	if len(cat.Progressive) > 0 {
+		testURL2(ctx, r.httpClient, "IT-P-18-tail", cat.Progressive[0].URL, cat.Progressive[0].UserAgent, "bytes=8000000-8165468")
+		testURL2(ctx, r.httpClient, "IT-P-18-open", cat.Progressive[0].URL, cat.Progressive[0].UserAgent, "bytes=0-")
+	}
+	// Test IOS audio itag 249 / 251 / 139 / 140
+	for _, af := range cat.AudioFormats {
+		testURL2(ctx, r.httpClient, fmt.Sprintf("IT-A-%d-1.5M", af.Itag), af.URL, af.UserAgent, "bytes=1500000-1565535")
 	}
 }
 
 func testURL2(ctx context.Context, hc *http.Client, tag, u, ua, rng string) {
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	req.Header.Set("User-Agent", ua)
-	req.Header.Set("Range", rng)
+	if rng != "" {
+		req.Header.Set("Range", rng)
+	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		fmt.Printf("[%s] rng=%q ERR=%v\n", tag, rng, err)
+		fmt.Printf("[%s] ERR=%v\n", tag, err)
 		return
 	}
-	n, _ := io.Copy(io.Discard, resp.Body)
+	n, _ := io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	resp.Body.Close()
-	fmt.Printf("[%s] rng=%q status=%d ct=%q cl=%q cr=%q read=%d\n",
-		tag, rng, resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Content-Length"), resp.Header.Get("Content-Range"), n)
+	fmt.Printf("[%s] rng=%q status=%d cl=%q cr=%q read=%d\n", tag, rng, resp.StatusCode, resp.Header.Get("Content-Length"), resp.Header.Get("Content-Range"), n)
 }
