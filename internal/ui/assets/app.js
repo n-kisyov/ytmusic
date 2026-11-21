@@ -154,6 +154,8 @@
     vuStyle: 'led', // 'led' | 'bar'
     eqPreset: 'flat', // 'flat' | 'bass' | 'vocal' | 'bright'
     playbackRate: 1.0,
+    videoQuality: 720,
+    streamInfo: null,
     recentSearches: [],
     sleepEndMs: 0,
     sleepTickTimer: null,
@@ -335,6 +337,182 @@
     state.videoEnabled = enabled;
     videoPane.classList.toggle('open', enabled);
     videoToggleBtn.classList.toggle('active', enabled);
+    if (!enabled) {
+      closeVideoQualityMenu();
+    }
+    syncVideoScreenState(true);
+    updateBitrateUI();
+    renderVideoQualityUI();
+  }
+
+  function formatShortKbps(kbps) {
+    if (!Number.isFinite(kbps) || kbps <= 0) return '0k';
+    if (kbps >= 1000) {
+      return `${(kbps / 1000).toFixed(1)}M`;
+    }
+    return `${Math.round(kbps)}k`;
+  }
+
+  function updateBitrateUI() {
+    if (!bitrateStat) return;
+    const info = state.streamInfo;
+    if (state.currentIndex < 0 || !info || !info.audio_kbps) {
+      bitrateStat.textContent = '';
+      bitrateStat.title = 'Stream bitrate';
+      return;
+    }
+    const audioK = info.audio_kbps || 0;
+    const videoK = state.videoEnabled ? (info.video_kbps || 0) : 0;
+    if (state.videoEnabled && videoK > 0 && !info.progressive_only) {
+      bitrateStat.textContent = `${formatShortKbps(audioK)}+${formatShortKbps(videoK)}`;
+      const qLabel = info.active_quality ? `${info.active_quality}p` : `${state.videoQuality}p`;
+      bitrateStat.title = `Audio: ${audioK} kbps + Video (${qLabel}): ${videoK} kbps (${audioK + videoK} kbps total)`;
+    } else {
+      bitrateStat.textContent = `${Math.round(audioK)}kbps`;
+      bitrateStat.title = (state.videoEnabled && info.progressive_only && info.active_quality)
+        ? `Combined stream (${info.active_quality}p): ${audioK} kbps`
+        : `Audio stream: ${audioK} kbps`;
+    }
+  }
+
+  function closeVideoQualityMenu() {
+    if (videoQualityMenu) videoQualityMenu.classList.add('hidden');
+    if (videoQualityWrap) videoQualityWrap.classList.remove('menu-open');
+  }
+
+  function renderVideoQualityUI() {
+    if (!videoQualityWrap || !videoQualityBtn || !videoQualityMenu) return;
+    const info = state.streamInfo;
+    const list = Array.isArray(info?.available_qualities) ? info.available_qualities : [];
+    const showControls = state.videoEnabled && state.currentIndex >= 0 && list.length > 0;
+    videoQualityWrap.classList.toggle('hidden', !showControls);
+    if (!showControls) {
+      closeVideoQualityMenu();
+      return;
+    }
+
+    const activeQ = info.active_quality || state.videoQuality || 720;
+    const prefQ = state.videoQuality || info.requested_quality || 720;
+    videoQualityBtn.textContent = `${activeQ}p ▾`;
+    videoQualityBtn.title = activeQ !== prefQ
+      ? `Playing ${activeQ}p (${prefQ}p unavailable — next lower selected)`
+      : `Video quality: ${activeQ}p`;
+
+    videoQualityMenu.innerHTML = '';
+    const frag = document.createDocumentFragment();
+    list.forEach((opt) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      const isAct = opt.height === activeQ;
+      btn.className = 'video-quality-item' + (isAct ? ' active' : '');
+
+      const left = document.createElement('span');
+      if (isAct) {
+        const chk = document.createElement('span');
+        chk.className = 'video-quality-check';
+        chk.textContent = '✓';
+        left.appendChild(chk);
+      }
+      left.appendChild(document.createTextNode(opt.label || `${opt.height}p`));
+
+      const right = document.createElement('span');
+      right.className = 'video-quality-kbps';
+      right.textContent = opt.kbps > 0 ? formatShortKbps(opt.kbps) : '';
+
+      btn.appendChild(left);
+      btn.appendChild(right);
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        closeVideoQualityMenu();
+        state.videoQuality = opt.height;
+        try {
+          const updated = await window.backendSetVideoQuality(opt.height);
+          if (updated) {
+            applyStreamSelection(updated, !media.paused && !media.ended, media.currentTime || 0, true);
+          }
+          showToast(`Quality preference: ${opt.height}p`);
+        } catch (_) {
+          showToast('Failed to change quality');
+        }
+      });
+      frag.appendChild(btn);
+    });
+    videoQualityMenu.appendChild(frag);
+  }
+
+  function syncVideoScreenState(forceSeek = false) {
+    if (!videoScreen) return;
+    const info = state.streamInfo;
+    const usePairedVideo = state.videoEnabled && info && !info.progressive_only && Boolean(info.video_url);
+    if (!usePairedVideo) {
+      videoScreen.classList.add('hidden');
+      media.classList.remove('master-hidden');
+      if (!videoScreen.paused) videoScreen.pause();
+      if (videoScreen.getAttribute('src')) {
+        videoScreen.removeAttribute('src');
+        videoScreen.load();
+      }
+      return;
+    }
+
+    media.classList.add('master-hidden');
+    videoScreen.classList.remove('hidden');
+    videoScreen.muted = true;
+    videoScreen.playbackRate = state.playbackRate;
+
+    if (videoScreen.getAttribute('src') !== info.video_url) {
+      videoScreen.src = info.video_url;
+      videoScreen.load();
+      forceSeek = true;
+    }
+
+    if (videoScreen.readyState >= 1 && !videoScreen.seeking) {
+      const target = media.currentTime || 0;
+      if (forceSeek || Math.abs((videoScreen.currentTime || 0) - target) > 0.22) {
+        try {
+          videoScreen.currentTime = target;
+        } catch (_) {}
+      }
+    }
+
+    if (!media.paused && !media.ended) {
+      if (videoScreen.paused) {
+        videoScreen.play().catch(() => {});
+      }
+    } else if (!videoScreen.paused) {
+      videoScreen.pause();
+    }
+  }
+
+  function applyStreamSelection(info, autoplay, startPosSec, videoOnlyHotSwap = false) {
+    state.streamInfo = info || null;
+    if (info && info.requested_quality > 0) {
+      state.videoQuality = info.requested_quality;
+    }
+    updateBitrateUI();
+    renderVideoQualityUI();
+
+    if (videoOnlyHotSwap) {
+      syncVideoScreenState(true);
+      return;
+    }
+
+    if (!info || !info.audio_url) {
+      videoLoading.classList.add('hidden');
+      return;
+    }
+    media.src = info.audio_url;
+    media.playbackRate = state.playbackRate;
+    media.load();
+    syncVideoScreenState(true);
+    if (autoplay) {
+      media.play().catch(() => {
+        state.userInitiatedPlay = false;
+        updatePlayButtonUI();
+      });
+    } else {
+      updatePlayButtonUI();
+    }
   }
 
   function applyPlaylistModeUI(expanded) {
@@ -1635,22 +1813,9 @@
 
     videoLoading.classList.remove('hidden');
     try {
-      const streamURL = await window.backendSelectTrack(index);
+      const info = await window.backendSelectTrack(index);
       if (seq !== state.playbackSeq) return;
-      if (!streamURL) {
-        videoLoading.classList.add('hidden');
-        return;
-      }
-      media.src = streamURL;
-      media.playbackRate = state.playbackRate;
-      media.load();
-      if (autoplay) {
-        media.play().catch(() => {
-          updatePlayButtonUI();
-        });
-      } else {
-        updatePlayButtonUI();
-      }
+      applyStreamSelection(info, autoplay, startPosSec, false);
       pushPlaybackState();
     } catch (err) {
       if (seq !== state.playbackSeq) return;
