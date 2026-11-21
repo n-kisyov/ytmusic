@@ -193,3 +193,43 @@ func TestLiveStreamResolve(t *testing.T) {
 		t.Fatalf("expected 1024 bytes from range request, got %d", len(buf))
 	}
 }
+
+func TestSelectStreamsDefault720AndFallbackAnd1080Preference(t *testing.T) {
+	cat := TrackCatalog{
+		AudioFormats: []FormatStream{
+			{Itag: 139, URL: "http://a/139", Kind: "audio", BitrateKbps: 49, IsAAC: true},
+			{Itag: 140, URL: "http://a/140", Kind: "audio", BitrateKbps: 130, IsAAC: true},
+			{Itag: 251, URL: "http://a/251", Kind: "audio", BitrateKbps: 161, IsAAC: false},
+		},
+		VideoFormats: []FormatStream{
+			{Itag: 137, URL: "http://v/1080-h264", Kind: "video", Height: 1080, QualityLabel: "1080p", BitrateKbps: 2135, IsH264: true},
+			{Itag: 248, URL: "http://v/1080-vp9", Kind: "video", Height: 1080, QualityLabel: "1080p", BitrateKbps: 1072, IsH264: false},
+			{Itag: 135, URL: "http://v/480-h264", Kind: "video", Height: 480, QualityLabel: "480p", BitrateKbps: 494, IsH264: true},
+			{Itag: 134, URL: "http://v/360-h264", Kind: "video", Height: 360, QualityLabel: "360p", BitrateKbps: 295, IsH264: true},
+		},
+		Progressive: []FormatStream{
+			{Itag: 18, URL: "http://p/18", Kind: "progressive", Height: 360, BitrateKbps: 424, IsH264: true, IsAAC: true},
+		},
+	}
+
+	// Audio-only mode picks AAC itag 140 (130 kbps) and leaves video empty.
+	audOnly := SelectStreams(cat, false, 720)
+	if audOnly.AudioURL != "http://a/140" || audOnly.AudioBitrateKbps != 130 || audOnly.VideoURL != "" || audOnly.VideoBitrateKbps != 0 {
+		t.Fatalf("unexpected audio-only selection: %+v", audOnly)
+	}
+
+	// Video enabled with default 720p when 720p is unavailable steps down to next lower (480p).
+	defVid := SelectStreams(cat, true, 0)
+	if defVid.RequestedQuality != 720 || defVid.ActiveQuality != 480 || defVid.VideoURL != "http://v/480-h264" || defVid.VideoBitrateKbps != 494 {
+		t.Fatalf("expected 720p pref without 720p tier to pick 480p, got %+v", defVid)
+	}
+
+	// Video enabled with 1080p picks H.264 1080p over VP9 1080p.
+	hdVid := SelectStreams(cat, true, 1080)
+	if hdVid.ActiveQuality != 1080 || hdVid.VideoURL != "http://v/1080-h264" || hdVid.VideoBitrateKbps != 2135 {
+		t.Fatalf("expected 1080p H.264 selection, got %+v", hdVid)
+	}
+	if len(hdVid.AvailableQualities) != 3 || hdVid.AvailableQualities[0].Height != 1080 {
+		t.Fatalf("expected 3 unique qualities sorted descending, got %+v", hdVid.AvailableQualities)
+	}
+}

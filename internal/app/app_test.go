@@ -31,6 +31,10 @@ func TestFormatPlayTimeAndTargetHeight(t *testing.T) {
 	if h := computeTargetHeight(true, true); h != baseHeight+videoHeight+playlistHeight {
 		t.Fatalf("expected full height %d, got %d", baseHeight+videoHeight+playlistHeight, h)
 	}
+	def := config.DefaultAppState()
+	if def.VideoQuality != 720 {
+		t.Fatalf("expected default VideoQuality=720, got %d", def.VideoQuality)
+	}
 }
 
 func TestAppTrailingPlaytimeAndResetStats(t *testing.T) {

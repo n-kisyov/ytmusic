@@ -301,6 +301,7 @@ func TestAppStateRenameMoveAndAudioPrefs(t *testing.T) {
 	s.VuStyle = "bar"
 	s.EQPreset = "bass"
 	s.PlaybackRate = 1.25
+	s.VideoQuality = 1080
 	s.TotalPlayTimeSec = 3725
 	if err := SaveAppStateTo(path, s); err != nil {
 		t.Fatalf("SaveAppStateTo failed: %v", err)
@@ -309,7 +310,7 @@ func TestAppStateRenameMoveAndAudioPrefs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadAppStateFrom failed: %v", err)
 	}
-	if loaded.VuStyle != "bar" || loaded.EQPreset != "bass" || loaded.PlaybackRate != 1.25 || loaded.TotalPlayTimeSec != 3725 || len(loaded.RecentSearches) != 2 {
+	if loaded.VuStyle != "bar" || loaded.EQPreset != "bass" || loaded.PlaybackRate != 1.25 || loaded.VideoQuality != 1080 || loaded.TotalPlayTimeSec != 3725 || len(loaded.RecentSearches) != 2 {
 		t.Fatalf("loaded new prefs mismatch: %+v", loaded)
 	}
 
