@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,10 +22,11 @@ import (
 )
 
 const (
-	streamCacheTTL    = 90 * time.Minute
-	androidUserAgent  = "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip"
-	iosUserAgent      = "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)"
-	desktopChromeUA   = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+	streamCacheTTL   = 90 * time.Minute
+	defaultQuality   = 720
+	androidUserAgent = "com.google.android.youtube/20.10.38 (Linux; U; Android 14) gzip"
+	iosUserAgent     = "com.google.ios.youtube/19.45.4 (iPhone16,2; U; CPU iOS 18_1_0 like Mac OS X;)"
+	desktopChromeUA  = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
 
 // ResolvedStream holds a resolved stream URL and the User-Agent required by upstream.
@@ -32,9 +35,56 @@ type ResolvedStream struct {
 	UserAgent string
 }
 
+// FormatStream describes an individual playable audio, video, or progressive media stream.
+type FormatStream struct {
+	Itag         int    `json:"itag"`
+	URL          string `json:"url"`
+	UserAgent    string `json:"-"`
+	Kind         string `json:"kind"` // "audio" | "video" | "progressive"
+	MimeType     string `json:"mime_type"`
+	Height       int    `json:"height,omitempty"`
+	QualityLabel string `json:"quality_label,omitempty"`
+	BitrateKbps  int    `json:"bitrate_kbps"`
+	IsH264       bool   `json:"is_h264,omitempty"`
+	IsAAC        bool   `json:"is_aac,omitempty"`
+}
+
+// QualityOption represents a selectable video resolution tier and its video bitrate.
+type QualityOption struct {
+	Height int    `json:"height"`
+	Label  string `json:"label"`
+	Kbps   int    `json:"kbps"`
+}
+
+// TrackCatalog contains all resolved audio, adaptive video, and progressive streams for a track.
+type TrackCatalog struct {
+	AudioFormats []FormatStream
+	VideoFormats []FormatStream
+	Progressive  []FormatStream
+}
+
+// StreamSelection holds the chosen audio/video streams, active bitrates, and quality options.
+type StreamSelection struct {
+	AudioURL           string          `json:"audio_url"`
+	AudioUserAgent     string          `json:"-"`
+	AudioBitrateKbps   int             `json:"audio_kbps"`
+	VideoURL           string          `json:"video_url,omitempty"`
+	VideoUserAgent     string          `json:"-"`
+	VideoBitrateKbps   int             `json:"video_kbps"`
+	RequestedQuality   int             `json:"requested_quality"`
+	ActiveQuality      int             `json:"active_quality"`
+	ProgressiveOnly    bool            `json:"progressive_only,omitempty"`
+	AvailableQualities []QualityOption `json:"available_qualities,omitempty"`
+}
+
 type cachedStream struct {
 	URL       string
 	UserAgent string
+	ExpiresAt time.Time
+}
+
+type cachedCatalog struct {
+	Catalog   TrackCatalog
 	ExpiresAt time.Time
 }
 
@@ -44,16 +94,24 @@ type inflightResolve struct {
 	err    error
 }
 
-// Resolver resolves playable progressive MP4 (audio+video) stream URLs for YouTube video IDs.
+type inflightCatalogResolve struct {
+	done    chan struct{}
+	catalog TrackCatalog
+	err     error
+}
+
+// Resolver resolves playable audio/video stream URLs and bitrates for YouTube video IDs.
 type Resolver struct {
 	httpClient *http.Client
 
-	mu       sync.Mutex
-	cache    map[string]cachedStream
-	inflight map[string]*inflightResolve
-	ytdlp    string
-	checked  bool
-	auth     config.AuthState
+	mu              sync.Mutex
+	cache           map[string]cachedStream
+	catalogs        map[string]cachedCatalog
+	inflight        map[string]*inflightResolve
+	inflightCatalog map[string]*inflightCatalogResolve
+	ytdlp           string
+	checked         bool
+	auth            config.AuthState
 }
 
 // NewResolver creates a stream resolver with in-memory caching.
@@ -62,9 +120,11 @@ func NewResolver(httpClient *http.Client) *Resolver {
 		httpClient = &http.Client{Timeout: 20 * time.Second}
 	}
 	return &Resolver{
-		httpClient: httpClient,
-		cache:      make(map[string]cachedStream),
-		inflight:   make(map[string]*inflightResolve),
+		httpClient:      httpClient,
+		cache:           make(map[string]cachedStream),
+		catalogs:        make(map[string]cachedCatalog),
+		inflight:        make(map[string]*inflightResolve),
+		inflightCatalog: make(map[string]*inflightCatalogResolve),
 	}
 }
 
@@ -75,14 +135,15 @@ func (r *Resolver) SetAuth(auth config.AuthState) {
 	r.auth = auth
 }
 
-// Invalidate removes a cached stream URL (e.g. after upstream 403/410).
+// Invalidate removes cached streams for videoID (e.g. after upstream 403/410).
 func (r *Resolver) Invalidate(videoID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	delete(r.cache, videoID)
+	delete(r.catalogs, videoID)
 }
 
-// Prefetch warms the stream cache in the background for the upcoming track.
+// Prefetch warms the stream catalog cache in the background for the upcoming track.
 func (r *Resolver) Prefetch(videoID string) {
 	if videoID == "" {
 		return
@@ -90,7 +151,7 @@ func (r *Resolver) Prefetch(videoID string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
-		_, _ = r.Resolve(ctx, videoID)
+		_, _ = r.ResolveCatalog(ctx, videoID)
 	}()
 }
 
@@ -102,6 +163,12 @@ func (r *Resolver) Resolve(ctx context.Context, videoID string) (string, error) 
 
 // ResolveStream returns a direct CDN URL and associated User-Agent for the given YouTube video ID.
 func (r *Resolver) ResolveStream(ctx context.Context, videoID string) (ResolvedStream, error) {
+	return r.ResolveStreamVariant(ctx, videoID, "", 0)
+}
+
+// ResolveStreamVariant resolves a specific stream variant ("audio", "video", or default/progressive)
+// honoring the preferred video height when kind == "video".
+func (r *Resolver) ResolveStreamVariant(ctx context.Context, videoID, kind string, prefHeight int) (ResolvedStream, error) {
 	videoID = strings.TrimSpace(videoID)
 	if videoID == "" {
 		return ResolvedStream{}, errors.New("video ID is empty")
@@ -112,28 +179,100 @@ func (r *Resolver) ResolveStream(ctx context.Context, videoID string) (ResolvedS
 		r.mu.Unlock()
 		return ResolvedStream{URL: entry.URL, UserAgent: entry.UserAgent}, nil
 	}
-	call, ok := r.inflight[videoID]
+	if kind == "" && prefHeight == 0 {
+		if call, ok := r.inflight[videoID]; ok {
+			r.mu.Unlock()
+			select {
+			case <-call.done:
+				return call.stream, call.err
+			case <-ctx.Done():
+				return ResolvedStream{}, ctx.Err()
+			}
+		}
+	}
+	r.mu.Unlock()
+
+	cat, err := r.ResolveCatalog(ctx, videoID)
+	if err != nil {
+		return ResolvedStream{}, err
+	}
+
+	if prefHeight <= 0 {
+		prefHeight = defaultQuality
+	}
+
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "video":
+		sel := SelectStreams(cat, true, prefHeight)
+		if sel.VideoURL != "" {
+			return ResolvedStream{URL: sel.VideoURL, UserAgent: sel.VideoUserAgent}, nil
+		}
+		if sel.AudioURL != "" {
+			return ResolvedStream{URL: sel.AudioURL, UserAgent: sel.AudioUserAgent}, nil
+		}
+	case "audio":
+		sel := SelectStreams(cat, false, prefHeight)
+		if sel.AudioURL != "" {
+			return ResolvedStream{URL: sel.AudioURL, UserAgent: sel.AudioUserAgent}, nil
+		}
+	default:
+		if len(cat.Progressive) > 0 {
+			p := cat.Progressive[0]
+			return ResolvedStream{URL: p.URL, UserAgent: p.UserAgent}, nil
+		}
+		sel := SelectStreams(cat, false, prefHeight)
+		if sel.AudioURL != "" {
+			return ResolvedStream{URL: sel.AudioURL, UserAgent: sel.AudioUserAgent}, nil
+		}
+	}
+
+	return ResolvedStream{}, fmt.Errorf("no %s stream available for %s", kind, videoID)
+}
+
+// ResolveCatalogSelection resolves and selects audio/video streams for videoID according to preferences.
+func (r *Resolver) ResolveCatalogSelection(ctx context.Context, videoID string, videoEnabled bool, prefHeight int) (StreamSelection, error) {
+	cat, err := r.ResolveCatalog(ctx, videoID)
+	if err != nil {
+		return StreamSelection{}, err
+	}
+	sel := SelectStreams(cat, videoEnabled, prefHeight)
+	if sel.AudioURL == "" && sel.VideoURL == "" {
+		return StreamSelection{}, fmt.Errorf("unable to resolve playable stream for %s", videoID)
+	}
+	return sel, nil
+}
+
+// ResolveCatalog returns cached or freshly resolved TrackCatalog formats using single-flight deduplication.
+func (r *Resolver) ResolveCatalog(ctx context.Context, videoID string) (TrackCatalog, error) {
+	videoID = strings.TrimSpace(videoID)
+	if videoID == "" {
+		return TrackCatalog{}, errors.New("video ID is empty")
+	}
+
+	r.mu.Lock()
+	if entry, ok := r.catalogs[videoID]; ok && time.Now().Before(entry.ExpiresAt) {
+		r.mu.Unlock()
+		return entry.Catalog, nil
+	}
+	call, ok := r.inflightCatalog[videoID]
 	if !ok {
-		call = &inflightResolve{done: make(chan struct{})}
-		r.inflight[videoID] = call
+		call = &inflightCatalogResolve{done: make(chan struct{})}
+		r.inflightCatalog[videoID] = call
 		go func() {
-			// Run upstream resolution with a detached timeout so canceling one speculative
-			// browser range request does not abort concurrent waiters for the same track.
 			resolveCtx, resolveCancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer resolveCancel()
 
-			st, err := r.resolveUncached(resolveCtx, videoID)
+			cat, err := r.resolveCatalogUncached(resolveCtx, videoID)
 
 			r.mu.Lock()
-			if err == nil && st.URL != "" {
-				r.cache[videoID] = cachedStream{
-					URL:       st.URL,
-					UserAgent: st.UserAgent,
+			if err == nil && (len(cat.AudioFormats) > 0 || len(cat.VideoFormats) > 0 || len(cat.Progressive) > 0) {
+				r.catalogs[videoID] = cachedCatalog{
+					Catalog:   cat,
 					ExpiresAt: time.Now().Add(streamCacheTTL),
 				}
 			}
-			delete(r.inflight, videoID)
-			call.stream = st
+			delete(r.inflightCatalog, videoID)
+			call.catalog = cat
 			call.err = err
 			close(call.done)
 			r.mu.Unlock()
@@ -143,22 +282,199 @@ func (r *Resolver) ResolveStream(ctx context.Context, videoID string) (ResolvedS
 
 	select {
 	case <-call.done:
-		return call.stream, call.err
+		return call.catalog, call.err
 	case <-ctx.Done():
-		return ResolvedStream{}, ctx.Err()
+		return TrackCatalog{}, ctx.Err()
 	}
 }
 
-func (r *Resolver) resolveUncached(ctx context.Context, videoID string) (ResolvedStream, error) {
-	if st, err := r.resolveWithInnerTube(ctx, videoID); err == nil && st.URL != "" {
-		return st, nil
+// SelectStreams picks optimal audio & video streams for prefHeight, falling back to the next lower tier when unavailable.
+func SelectStreams(cat TrackCatalog, videoEnabled bool, prefHeight int) StreamSelection {
+	if prefHeight <= 0 {
+		prefHeight = defaultQuality
 	}
-	if bin := r.getYtDlpPath(); bin != "" {
-		if st, err := r.resolveWithYtDlp(ctx, bin, videoID); err == nil && st.URL != "" {
-			return st, nil
+
+	sel := StreamSelection{
+		RequestedQuality: prefHeight,
+	}
+
+	bestByHeight := make(map[int]FormatStream)
+	updateTier := func(f FormatStream) {
+		if f.URL == "" || f.Height <= 0 {
+			return
+		}
+		cur, exists := bestByHeight[f.Height]
+		if !exists || betterVideoCandidate(f, cur) {
+			bestByHeight[f.Height] = f
 		}
 	}
-	return ResolvedStream{}, fmt.Errorf("unable to resolve playable stream for %s", videoID)
+
+	for _, vf := range cat.VideoFormats {
+		updateTier(vf)
+	}
+	if len(bestByHeight) == 0 {
+		for _, pf := range cat.Progressive {
+			updateTier(pf)
+		}
+	}
+
+	heights := make([]int, 0, len(bestByHeight))
+	for h := range bestByHeight {
+		heights = append(heights, h)
+	}
+	sort.Sort(sort.Reverse(sort.IntSlice(heights)))
+
+	if len(heights) > 0 {
+		sel.AvailableQualities = make([]QualityOption, 0, len(heights))
+		for _, h := range heights {
+			vf := bestByHeight[h]
+			lbl := fmt.Sprintf("%dp", h)
+			sel.AvailableQualities = append(sel.AvailableQualities, QualityOption{
+				Height: h,
+				Label:  lbl,
+				Kbps:   vf.BitrateKbps,
+			})
+		}
+	}
+
+	audio, hasAudio := pickBestAudio(cat.AudioFormats)
+	prog, hasProg := pickBestProgressive(cat.Progressive)
+
+	if hasAudio {
+		sel.AudioURL = audio.URL
+		sel.AudioUserAgent = audio.UserAgent
+		sel.AudioBitrateKbps = audio.BitrateKbps
+	} else if hasProg {
+		sel.AudioURL = prog.URL
+		sel.AudioUserAgent = prog.UserAgent
+		sel.AudioBitrateKbps = prog.BitrateKbps
+		sel.ProgressiveOnly = true
+		if sel.ActiveQuality == 0 && prog.Height > 0 {
+			sel.ActiveQuality = prog.Height
+		}
+	}
+
+	if videoEnabled {
+		chosenHeight := pickResolutionHeight(heights, prefHeight)
+		if chosenHeight > 0 {
+			chosenVid := bestByHeight[chosenHeight]
+			sel.ActiveQuality = chosenHeight
+			if chosenVid.Kind == "progressive" || !hasAudio {
+				if hasProg {
+					sel.AudioURL = prog.URL
+					sel.AudioUserAgent = prog.UserAgent
+					sel.AudioBitrateKbps = prog.BitrateKbps
+					sel.VideoURL = ""
+					sel.VideoBitrateKbps = 0
+					sel.ProgressiveOnly = true
+				} else if chosenVid.URL != "" {
+					sel.VideoURL = chosenVid.URL
+					sel.VideoUserAgent = chosenVid.UserAgent
+					sel.VideoBitrateKbps = chosenVid.BitrateKbps
+				}
+			} else {
+				sel.VideoURL = chosenVid.URL
+				sel.VideoUserAgent = chosenVid.UserAgent
+				sel.VideoBitrateKbps = chosenVid.BitrateKbps
+				sel.ProgressiveOnly = false
+			}
+		}
+	}
+
+	return sel
+}
+
+func pickResolutionHeight(descHeights []int, pref int) int {
+	if len(descHeights) == 0 {
+		return 0
+	}
+	for _, h := range descHeights {
+		if h <= pref {
+			return h
+		}
+	}
+	// All available tiers exceed pref: fall back to lowest available tier.
+	return descHeights[len(descHeights)-1]
+}
+
+func betterVideoCandidate(cand, cur FormatStream) bool {
+	if cand.Kind != "progressive" && cur.Kind == "progressive" {
+		return true
+	}
+	if cand.IsH264 != cur.IsH264 {
+		return cand.IsH264
+	}
+	return cand.BitrateKbps > cur.BitrateKbps
+}
+
+func pickBestAudio(list []FormatStream) (FormatStream, bool) {
+	if len(list) == 0 {
+		return FormatStream{}, false
+	}
+	best := list[0]
+	for _, f := range list[1:] {
+		if f.URL == "" {
+			continue
+		}
+		if best.URL == "" {
+			best = f
+			continue
+		}
+		if f.IsAAC != best.IsAAC {
+			if f.IsAAC {
+				best = f
+			}
+			continue
+		}
+		if f.BitrateKbps > best.BitrateKbps {
+			best = f
+		}
+	}
+	return best, best.URL != ""
+}
+
+func pickBestProgressive(list []FormatStream) (FormatStream, bool) {
+	if len(list) == 0 {
+		return FormatStream{}, false
+	}
+	best := list[0]
+	for _, f := range list[1:] {
+		if f.Itag == 18 && best.Itag != 18 {
+			best = f
+			continue
+		}
+		if best.Itag != 18 && f.IsH264 && !best.IsH264 {
+			best = f
+		}
+	}
+	return best, best.URL != ""
+}
+
+func (r *Resolver) resolveCatalogUncached(ctx context.Context, videoID string) (TrackCatalog, error) {
+	if cat, err := r.resolveCatalogWithInnerTube(ctx, videoID); err == nil {
+		return cat, nil
+	}
+	if bin := r.getYtDlpPath(); bin != "" {
+		if cat, err := r.resolveCatalogWithYtDlp(ctx, bin, videoID); err == nil {
+			return cat, nil
+		}
+		if st, err := r.resolveWithYtDlp(ctx, bin, videoID); err == nil && st.URL != "" {
+			return TrackCatalog{
+				Progressive: []FormatStream{{
+					Itag:         18,
+					URL:          st.URL,
+					UserAgent:    st.UserAgent,
+					Kind:         "progressive",
+					MimeType:     "video/mp4",
+					Height:       360,
+					QualityLabel: "360p",
+					IsH264:       true,
+					IsAAC:        true,
+				}},
+			}, nil
+		}
+	}
+	return TrackCatalog{}, fmt.Errorf("unable to resolve playable stream for %s", videoID)
 }
 
 func (r *Resolver) getYtDlpPath() string {
@@ -189,6 +505,122 @@ func FindYtDlp() string {
 		}
 	}
 	return ""
+}
+
+func (r *Resolver) resolveCatalogWithYtDlp(ctx context.Context, bin, videoID string) (TrackCatalog, error) {
+	args := []string{
+		"-J",
+		"--extractor-args", "youtube:player_client=android,web",
+		"--no-playlist",
+		"--no-warnings",
+		"--socket-timeout", "10",
+	}
+
+	r.mu.Lock()
+	loggedIn := r.auth.LoggedIn
+	r.mu.Unlock()
+
+	if loggedIn {
+		if cookiesPath, err := config.CookiesTxtPath(); err == nil {
+			if _, err := os.Stat(cookiesPath); err == nil {
+				args = append(args, "--cookies", cookiesPath)
+			}
+		}
+	}
+	args = append(args, "https://www.youtube.com/watch?v="+videoID)
+
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return TrackCatalog{}, fmt.Errorf("yt-dlp -J failed: %w (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+
+	var meta struct {
+		Formats []struct {
+			FormatID    string            `json:"format_id"`
+			URL         string            `json:"url"`
+			Ext         string            `json:"ext"`
+			Protocol    string            `json:"protocol"`
+			Vcodec      string            `json:"vcodec"`
+			Acodec      string            `json:"acodec"`
+			Height      int               `json:"height"`
+			FormatNote  string            `json:"format_note"`
+			ABR         float64           `json:"abr"`
+			VBR         float64           `json:"vbr"`
+			TBR         float64           `json:"tbr"`
+			HTTPHeaders map[string]string `json:"http_headers"`
+		} `json:"formats"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &meta); err != nil {
+		return TrackCatalog{}, err
+	}
+
+	var cat TrackCatalog
+	for _, f := range meta.Formats {
+		if !strings.HasPrefix(f.URL, "http://") && !strings.HasPrefix(f.URL, "https://") {
+			continue
+		}
+		lowerProto := strings.ToLower(f.Protocol)
+		lowerURL := strings.ToLower(f.URL)
+		if strings.Contains(lowerProto, "m3u8") || strings.Contains(lowerURL, ".m3u8") || strings.Contains(lowerURL, "manifest/hls") {
+			continue
+		}
+		ua := f.HTTPHeaders["User-Agent"]
+		if ua == "" {
+			if strings.Contains(f.URL, "c=ANDROID") {
+				ua = androidUserAgent
+			} else if strings.Contains(f.URL, "c=IOS") {
+				ua = iosUserAgent
+			} else {
+				ua = desktopChromeUA
+			}
+		}
+		itag, _ := strconv.Atoi(f.FormatID)
+		hasVideo := f.Vcodec != "" && f.Vcodec != "none"
+		hasAudio := f.Acodec != "" && f.Acodec != "none"
+		kbps := int(f.TBR + 0.5)
+		if !hasVideo && hasAudio && f.ABR > 0 {
+			kbps = int(f.ABR + 0.5)
+		} else if hasVideo && !hasAudio && f.VBR > 0 {
+			kbps = int(f.VBR + 0.5)
+		}
+
+		fs := FormatStream{
+			Itag:         itag,
+			URL:          f.URL,
+			UserAgent:    ua,
+			MimeType:     f.Ext,
+			Height:       f.Height,
+			QualityLabel: f.FormatNote,
+			BitrateKbps:  kbps,
+			IsH264:       strings.Contains(strings.ToLower(f.Vcodec), "avc1") || strings.Contains(strings.ToLower(f.Vcodec), "h264"),
+			IsAAC:        strings.Contains(strings.ToLower(f.Acodec), "mp4a") || f.Ext == "m4a" || f.Ext == "mp4",
+		}
+		switch {
+		case hasVideo && hasAudio:
+			fs.Kind = "progressive"
+			cat.Progressive = append(cat.Progressive, fs)
+		case hasAudio && !hasVideo:
+			fs.Kind = "audio"
+			cat.AudioFormats = append(cat.AudioFormats, fs)
+		case hasVideo && !hasAudio:
+			if fs.Height == 0 {
+				fs.Height = parseHeightFromLabel(fs.QualityLabel)
+			}
+			fs.Kind = "video"
+			cat.VideoFormats = append(cat.VideoFormats, fs)
+		}
+	}
+
+	if len(cat.AudioFormats) == 0 && len(cat.VideoFormats) == 0 && len(cat.Progressive) == 0 {
+		return TrackCatalog{}, errors.New("yt-dlp -J returned no usable formats")
+	}
+	return cat, nil
 }
 
 func (r *Resolver) resolveWithYtDlp(ctx context.Context, bin, videoID string) (ResolvedStream, error) {
@@ -245,7 +677,7 @@ func (r *Resolver) resolveWithYtDlp(ctx context.Context, bin, videoID string) (R
 	return ResolvedStream{}, errors.New("yt-dlp returned no progressive stream URL")
 }
 
-func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (ResolvedStream, error) {
+func (r *Resolver) resolveCatalogWithInnerTube(ctx context.Context, videoID string) (TrackCatalog, error) {
 	type clientDef struct {
 		ctx       map[string]any
 		userAgent string
@@ -316,23 +748,23 @@ func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (Re
 			continue
 		}
 
+		type rawFormat struct {
+			Itag           int    `json:"itag"`
+			URL            string `json:"url"`
+			MimeType       string `json:"mimeType"`
+			Bitrate        int    `json:"bitrate"`
+			AverageBitrate int    `json:"averageBitrate"`
+			Height         int    `json:"height"`
+			QualityLabel   string `json:"qualityLabel"`
+		}
 		var data struct {
 			PlayabilityStatus struct {
 				Status string `json:"status"`
 				Reason string `json:"reason"`
 			} `json:"playabilityStatus"`
 			StreamingData struct {
-				Formats []struct {
-					Itag          int    `json:"itag"`
-					URL           string `json:"url"`
-					MimeType      string `json:"mimeType"`
-					AudioChannels int    `json:"audioChannels"`
-				} `json:"formats"`
-				AdaptiveFormats []struct {
-					Itag     int    `json:"itag"`
-					URL      string `json:"url"`
-					MimeType string `json:"mimeType"`
-				} `json:"adaptiveFormats"`
+				Formats         []rawFormat `json:"formats"`
+				AdaptiveFormats []rawFormat `json:"adaptiveFormats"`
 			} `json:"streamingData"`
 		}
 		if err := json.Unmarshal(respBytes, &data); err != nil {
@@ -344,45 +776,123 @@ func (r *Resolver) resolveWithInnerTube(ctx context.Context, videoID string) (Re
 		if status != "" && status != "OK" {
 			lastErr = fmt.Errorf("playability %s: %s", status, strings.TrimSpace(data.PlayabilityStatus.Reason))
 			if status == "LOGIN_REQUIRED" && loggedIn {
-				// Let authenticated yt-dlp --cookies handle account-gated tracks immediately.
 				break
 			}
 			continue
 		}
 
-		candidates := make([]string, 0, 8)
-		for _, f := range data.StreamingData.Formats {
-			if f.URL != "" && f.Itag == 18 {
-				candidates = append(candidates, f.URL)
+		var cat TrackCatalog
+		parseKbps := func(avg, peak int) int {
+			bps := avg
+			if bps <= 0 {
+				bps = peak
 			}
-		}
-		for _, f := range data.StreamingData.Formats {
-			if f.URL != "" && f.Itag != 18 && strings.Contains(f.MimeType, "video/mp4") {
-				candidates = append(candidates, f.URL)
+			if bps <= 0 {
+				return 0
 			}
-		}
-		for _, f := range data.StreamingData.Formats {
-			if f.URL != "" && !strings.Contains(f.MimeType, "video/mp4") {
-				candidates = append(candidates, f.URL)
+			kbps := (bps + 500) / 1000
+			if kbps < 1 {
+				return 1
 			}
+			return kbps
 		}
+
+		for _, f := range data.StreamingData.Formats {
+			if f.URL == "" {
+				continue
+			}
+			h := f.Height
+			if h <= 0 {
+				h = parseHeightFromLabel(f.QualityLabel)
+			}
+			if h <= 0 && f.Itag == 18 {
+				h = 360
+			}
+			cat.Progressive = append(cat.Progressive, FormatStream{
+				Itag:         f.Itag,
+				URL:          f.URL,
+				UserAgent:    cl.userAgent,
+				Kind:         "progressive",
+				MimeType:     f.MimeType,
+				Height:       h,
+				QualityLabel: f.QualityLabel,
+				BitrateKbps:  parseKbps(f.AverageBitrate, f.Bitrate),
+				IsH264:       strings.Contains(f.MimeType, "avc1") || strings.Contains(f.MimeType, "video/mp4"),
+				IsAAC:        strings.Contains(f.MimeType, "mp4a") || strings.Contains(f.MimeType, "video/mp4"),
+			})
+		}
+
 		for _, f := range data.StreamingData.AdaptiveFormats {
-			if f.URL != "" && strings.HasPrefix(f.MimeType, "audio/mp4") {
-				candidates = append(candidates, f.URL)
+			if f.URL == "" {
+				continue
+			}
+			lowerMime := strings.ToLower(f.MimeType)
+			kbps := parseKbps(f.AverageBitrate, f.Bitrate)
+			switch {
+			case strings.HasPrefix(lowerMime, "audio/"):
+				if !strings.HasPrefix(lowerMime, "audio/mp4") && !strings.HasPrefix(lowerMime, "audio/webm") {
+					continue
+				}
+				cat.AudioFormats = append(cat.AudioFormats, FormatStream{
+					Itag:        f.Itag,
+					URL:         f.URL,
+					UserAgent:   cl.userAgent,
+					Kind:        "audio",
+					MimeType:    f.MimeType,
+					BitrateKbps: kbps,
+					IsAAC:       strings.HasPrefix(lowerMime, "audio/mp4"),
+				})
+			case strings.HasPrefix(lowerMime, "video/"):
+				h := f.Height
+				if h <= 0 {
+					h = parseHeightFromLabel(f.QualityLabel)
+				}
+				if h <= 0 {
+					continue
+				}
+				cat.VideoFormats = append(cat.VideoFormats, FormatStream{
+					Itag:         f.Itag,
+					URL:          f.URL,
+					UserAgent:    cl.userAgent,
+					Kind:         "video",
+					MimeType:     f.MimeType,
+					Height:       h,
+					QualityLabel: f.QualityLabel,
+					BitrateKbps:  kbps,
+					IsH264:       strings.Contains(lowerMime, "avc1"),
+				})
 			}
 		}
 
-		for _, u := range candidates {
-			if r.probeStreamURL(ctx, u, cl.userAgent) {
-				return ResolvedStream{URL: u, UserAgent: cl.userAgent}, nil
-			}
+		// Verify a representative URL once to confirm upstream CDN reachability with cl.userAgent.
+		var probeURL string
+		if len(cat.AudioFormats) > 0 {
+			probeURL = cat.AudioFormats[0].URL
+		} else if len(cat.Progressive) > 0 {
+			probeURL = cat.Progressive[0].URL
+		}
+		if probeURL != "" && r.probeStreamURL(ctx, probeURL, cl.userAgent) {
+			return cat, nil
 		}
 		lastErr = errors.New("no playable format URL passed probe")
 	}
 	if lastErr == nil {
 		lastErr = errors.New("failed to resolve stream URL")
 	}
-	return ResolvedStream{}, lastErr
+	return TrackCatalog{}, lastErr
+}
+
+func parseHeightFromLabel(label string) int {
+	label = strings.TrimSpace(strings.ToLower(label))
+	idx := strings.IndexByte(label, 'p')
+	if idx <= 0 {
+		return 0
+	}
+	h, err := strconv.Atoi(label[:idx])
+	if err != nil || h <= 0 {
+		return 0
+	}
+	return h
 }
 
 func (r *Resolver) probeStreamURL(ctx context.Context, streamURL, ua string) bool {
