@@ -6,70 +6,74 @@ import (
 	"math"
 )
 
-// RenderAppIconImage renders the ytmusic icon (dark obsidian rounded badge, crimson circle,
-// and white play glyph) at the requested square pixel dimension.
+// RenderAppIconImage renders the ytmusic app icon at the requested square pixel dimension:
+//   - Transparent background (outer black rounded badge removed).
+//   - Circular badge in lighter, vibrant YouTube red (#FF3232) filling the canvas with
+//     subpixel anti-aliasing and a comfortable breathing margin to prevent clipping.
+//   - Optically centered, enlarged white play triangle with smooth 1-pixel subpixel anti-aliased edges.
 func RenderAppIconImage(size int) *image.NRGBA {
 	img := image.NewNRGBA(image.Rect(0, 0, size, size))
 	cx := float64(size-1) / 2.0
 	cy := float64(size-1) / 2.0
 	half := float64(size) / 2.0
-	corner := float64(size) * 0.24
-	margin := math.Max(1.0, float64(size)*0.03)
-	rimWidth := math.Max(1.3, float64(size)*0.042)
+
+	// Breathing margin ensures the anti-aliased circle edge does not clip against the square canvas.
+	margin := math.Max(0.75, float64(size)*0.04)
+	circleR := half - margin - 0.5
+
+	// Slightly enlarged white play triangle (~28% increase in linear dimensions: 0.25 -> 0.32 of size).
+	// For an equilateral triangle pointing right:
+	//   Height = W * 2 / sqrt(3) ~= W * 1.1547 (triHalfH = W / sqrt(3) ~= W * 0.5774)
+	w := float64(size) * 0.32
+	triHalfH := w * (1.0 / math.Sqrt(3.0))
+
+	// Optically center the play triangle inside the circle:
+	// A right-pointing triangle has its geometric centroid at 1/3 from the left base (triLeft + w/3).
+	// A slight forward offset (+0.016 * size) balances the visual weight of the pointed apex.
+	opticalOffset := float64(size) * 0.016
+	triLeft := -w/3.0 + opticalOffset
+	triRight := triLeft + w
+	triHypot := math.Hypot(w, triHalfH)
 
 	for y := 0; y < size; y++ {
 		for x := 0; x < size; x++ {
 			fx := float64(x) + 0.5
 			fy := float64(y) + 0.5
 
-			// Signed distance to rounded square.
-			dx := math.Abs(fx-half) - (half - corner - margin)
-			dy := math.Abs(fy-half) - (half - corner - margin)
-			outDist := math.Hypot(math.Max(dx, 0), math.Max(dy, 0)) + math.Min(math.Max(dx, dy), 0) - corner
-
-			if outDist > 0.7 {
-				img.SetNRGBA(x, y, color.NRGBA{})
+			distC := math.Hypot(fx-half, fy-half)
+			if distC > circleR+0.5 {
 				continue
 			}
 
-			// Base dark obsidian background.
-			bgAlpha := clampByte((0.7 - outDist) * 255.0)
-			r, g, b := 24.0, 24.0, 32.0
-
-			// Outer subtle rim highlight.
-			if outDist > -rimWidth {
-				r, g, b = 58.0, 58.0, 74.0
+			circleAlpha := clamp01(circleR + 0.5 - distC)
+			if circleAlpha <= 0 {
+				continue
 			}
 
-			// Crimson circle in center.
-			distC := math.Hypot(fx-half, fy-half)
-			circleR := float64(size) * 0.34
-			if distC < circleR+0.7 {
-				mix := clamp01(circleR + 0.7 - distC)
-				r = r*(1-mix) + 255.0*mix
-				g = g*(1-mix) + 45.0*mix
-				b = b*(1-mix) + 85.0*mix
-			}
+			// Lighter, vibrant YouTube red (#FF3232 -> RGB 255, 50, 50).
+			r, g, b := 255.0, 50.0, 50.0
 
-			// Crisp white play triangle inside the circle.
+			// Distance inside play triangle:
+			// 1. Left base: x = triLeft. Inward distance: px - triLeft.
+			// 2. Diagonal edges: apex (triRight, 0) to (triLeft, ±triHalfH).
 			px := fx - cx
 			py := fy - cy
-			triLeft := -float64(size) * 0.09
-			triRight := float64(size) * 0.16
-			triHalfH := float64(size) * 0.145
-			if px >= triLeft && px <= triRight {
-				t := (px - triLeft) / (triRight - triLeft)
-				maxY := triHalfH * (1.0 - t)
-				if math.Abs(py) <= maxY {
-					r, g, b = 255, 255, 255
-				}
+			dBase := px - triLeft
+			dDiag := (triHalfH*(triRight-px) - w*math.Abs(py)) / triHypot
+			dIn := math.Min(dBase, dDiag)
+
+			if dIn > -0.5 {
+				triAlpha := clamp01(dIn + 0.5)
+				r = r*(1.0-triAlpha) + 255.0*triAlpha
+				g = g*(1.0-triAlpha) + 255.0*triAlpha
+				b = b*(1.0-triAlpha) + 255.0*triAlpha
 			}
 
 			img.SetNRGBA(x, y, color.NRGBA{
 				R: clampByte(r),
 				G: clampByte(g),
 				B: clampByte(b),
-				A: bgAlpha,
+				A: clampByte(circleAlpha * 255.0),
 			})
 		}
 	}
