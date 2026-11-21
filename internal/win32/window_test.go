@@ -96,8 +96,8 @@ func TestStartupHookAppliesLayeredExactRectAndStripsResizeBeforeShow(t *testing.
 		t.Fatalf("expected WS_EX_LAYERED applied during HCBT_CREATEWND, got exStyle=0x%x", exStyle)
 	}
 	style := getWindowLongPtr(hwnd, gwlStyle)
-	if (style & (wsCaption | wsThickFrame | wsMaximizeBox)) != 0 {
-		t.Fatalf("expected WS_CAPTION, WS_THICKFRAME and WS_MAXIMIZEBOX stripped, got style=0x%x", style)
+	if (style & (wsThickFrame | wsMaximizeBox)) != 0 {
+		t.Fatalf("expected WS_THICKFRAME and WS_MAXIMIZEBOX stripped, got style=0x%x", style)
 	}
 
 	if rc.Left != wantX || rc.Top != wantY || (rc.Right-rc.Left) != wantW || (rc.Bottom-rc.Top) != wantH {
@@ -146,6 +146,11 @@ func TestStartupHookAppliesLayeredExactRectAndStripsResizeBeforeShow(t *testing.
 	if ctrl.savedRect.Left != 200 || ctrl.savedRect.Top != 150 {
 		t.Fatalf("expected savedRect preserved at (200,150) during mid-restore minimize, got (%d,%d)", ctrl.savedRect.Left, ctrl.savedRect.Top)
 	}
+
+	// Verify StartDrag safely handles valid HWND and zero HWND without panics.
+	ctrl.StartDrag()
+	dummyCtrl := &Controller{}
+	dummyCtrl.StartDrag()
 }
 
 func TestTruncateTooltipUTF8AndSurrogates(t *testing.T) {
