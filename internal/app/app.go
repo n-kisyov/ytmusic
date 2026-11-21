@@ -66,6 +66,8 @@ type App struct {
 	sessionPlaySec   float64
 	lastTrayPlaySec  int64
 	lastPlaySaveTime time.Time
+	playActive       bool
+	playAnchorTime   time.Time
 }
 
 // New initializes application state, YouTube client, stream resolver, and local UI/stream server.
