@@ -96,8 +96,8 @@ func TestStartupHookAppliesLayeredExactRectAndStripsResizeBeforeShow(t *testing.
 		t.Fatalf("expected WS_EX_LAYERED applied during HCBT_CREATEWND, got exStyle=0x%x", exStyle)
 	}
 	style := getWindowLongPtr(hwnd, gwlStyle)
-	if (style & (wsThickFrame | wsMaximizeBox)) != 0 {
-		t.Fatalf("expected WS_THICKFRAME and WS_MAXIMIZEBOX stripped, got style=0x%x", style)
+	if (style & (wsCaption | wsThickFrame | wsMaximizeBox)) != 0 {
+		t.Fatalf("expected WS_CAPTION, WS_THICKFRAME and WS_MAXIMIZEBOX stripped, got style=0x%x", style)
 	}
 
 	if rc.Left != wantX || rc.Top != wantY || (rc.Right-rc.Left) != wantW || (rc.Bottom-rc.Top) != wantH {
