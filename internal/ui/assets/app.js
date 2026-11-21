@@ -3022,6 +3022,20 @@
     }
   };
 
+  window.__onStreamInfoUpdated = (info) => {
+    if (!info || !state.playlist[state.currentIndex]) return;
+    const prevProgressive = Boolean(state.streamInfo?.progressive_only);
+    state.streamInfo = info;
+    if (info.requested_quality > 0) state.videoQuality = info.requested_quality;
+    updateBitrateUI();
+    renderVideoQualityUI();
+    if (prevProgressive !== Boolean(info.progressive_only)) {
+      syncVideoScreenState(true);
+    } else if (state.videoEnabled && info.video_url && videoScreen && !videoScreen.getAttribute('src')) {
+      syncVideoScreenState(true);
+    }
+  };
+
   window.__onStatsReset = () => {
     state.baseTotalPlaySec = 0;
     state.sessionPlayMs = 0;
