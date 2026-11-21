@@ -96,6 +96,11 @@
     <!-- Collapsible Video Viewport (0px default / 214px when enabled) -->
     <section id="video-pane" class="video-pane">
       <video id="media-player" class="media-player-video" playsinline preload="metadata"></video>
+      <video id="video-screen" class="video-screen hidden" muted playsinline preload="none"></video>
+      <div id="video-quality-wrap" class="video-quality-wrap hidden">
+        <button id="video-quality-btn" type="button" class="video-quality-btn" title="Select video resolution">720p ▾</button>
+        <div id="video-quality-menu" class="video-quality-menu hidden"></div>
+      </div>
       <div id="video-loading-overlay" class="video-loading hidden">
         <span class="spinner lg"></span>
       </div>
@@ -115,6 +120,7 @@
           <div id="current-artist" class="track-artist">Audio-only mode • 30-song playlist</div>
         </div>
         <div class="vu-column">
+          <div id="bitrate-stat" class="bitrate-stat" title="Stream bitrate"></div>
           <div id="vu-meter" class="vu-meter" title="Stereo VU Meter (L / R) — Click to switch style" role="img" aria-label="Stereo VU Meter">
             <div class="vu-labels" aria-hidden="true">
               <span>L</span>
