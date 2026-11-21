@@ -1371,6 +1371,41 @@
     }
   }
 
+  function positionFloatingPopover(popEl, anchorEl) {
+    if (!popEl) return;
+    popEl.style.visibility = 'hidden';
+    popEl.classList.remove('hidden');
+    const popRect = popEl.getBoundingClientRect();
+    const anchorRect = anchorEl ? anchorEl.getBoundingClientRect() : null;
+    let top = anchorRect ? (anchorRect.bottom + 6) : Math.max(10, (window.innerHeight - popRect.height) / 2);
+    if (anchorRect && top + popRect.height > window.innerHeight - 8) {
+      const above = anchorRect.top - popRect.height - 6;
+      if (above >= 8) {
+        top = above;
+      }
+    }
+    top = Math.max(8, Math.min(Math.max(8, window.innerHeight - popRect.height - 8), top));
+    popEl.style.top = `${Math.round(top)}px`;
+    popEl.style.visibility = 'visible';
+  }
+
+  function pickNextShuffleIndex() {
+    const n = state.playlist.length;
+    if (n <= 1) return 0;
+    // Prune out-of-range or currently playing indices from existing bag.
+    state.shuffleBag = state.shuffleBag.filter((i) => i >= 0 && i < n && i !== state.currentIndex);
+    if (state.shuffleBag.length === 0) {
+      for (let i = 0; i < n; i++) {
+        if (i !== state.currentIndex) state.shuffleBag.push(i);
+      }
+      for (let i = state.shuffleBag.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [state.shuffleBag[i], state.shuffleBag[j]] = [state.shuffleBag[j], state.shuffleBag[i]];
+      }
+    }
+    return state.shuffleBag.pop();
+  }
+
   function clearErrorSkipTimer() {
     if (state.errorSkipTimer) {
       clearTimeout(state.errorSkipTimer);
@@ -2057,9 +2092,7 @@
         closeSearchDropdown();
         if (authPopover) authPopover.classList.add('hidden');
         if (shortcutsPopover) shortcutsPopover.classList.add('hidden');
-        const btnRect = eqBtn.getBoundingClientRect();
-        audioPopover.style.top = `${Math.round(btnRect.bottom + 6)}px`;
-        audioPopover.classList.remove('hidden');
+        positionFloatingPopover(audioPopover, eqBtn);
         updateSleepCountdownUI();
       } else {
         audioPopover.classList.add('hidden');
@@ -2109,6 +2142,14 @@
     });
   }
 
+  if (curOpenYtBtn) {
+    curOpenYtBtn.addEventListener('click', () => {
+      const tr = state.currentIndex >= 0 ? state.playlist[state.currentIndex] : null;
+      if (tr) openTrackExternal(tr);
+      else showToast('No active song');
+    });
+  }
+
   if (curRadioBtn) {
     curRadioBtn.addEventListener('click', async () => {
       const tr = state.currentIndex >= 0 ? state.playlist[state.currentIndex] : null;
@@ -2122,7 +2163,11 @@
     shortcutsHelpBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (audioPopover) audioPopover.classList.add('hidden');
-      shortcutsPopover.classList.toggle('hidden');
+      if (shortcutsPopover.classList.contains('hidden')) {
+        positionFloatingPopover(shortcutsPopover, eqBtn);
+      } else {
+        shortcutsPopover.classList.add('hidden');
+      }
     });
   }
 
