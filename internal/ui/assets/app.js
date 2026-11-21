@@ -2154,8 +2154,27 @@
   videoToggleBtn.addEventListener('click', async () => {
     const next = !state.videoEnabled;
     applyVideoModeUI(next);
-    await window.backendToggleVideo(next);
+    try {
+      const updated = await window.backendToggleVideo(next);
+      if (updated && state.currentIndex >= 0) {
+        applyStreamSelection(updated, !media.paused && !media.ended, media.currentTime || 0, true);
+      }
+    } catch (_) {}
   });
+
+  if (videoQualityBtn && videoQualityMenu && videoQualityWrap) {
+    videoQualityBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const opening = videoQualityMenu.classList.contains('hidden');
+      if (opening) {
+        renderVideoQualityUI();
+        videoQualityMenu.classList.remove('hidden');
+        videoQualityWrap.classList.add('menu-open');
+      } else {
+        closeVideoQualityMenu();
+      }
+    });
+  }
 
   playlistToggleBtn.addEventListener('click', async () => {
     const next = !state.playlistExpanded;
@@ -2577,6 +2596,11 @@
   }
 
   document.addEventListener('click', (e) => {
+    if (videoQualityMenu && !videoQualityMenu.classList.contains('hidden')) {
+      if (!videoQualityWrap.contains(e.target)) {
+        closeVideoQualityMenu();
+      }
+    }
     if (searchDropdown && !searchDropdown.classList.contains('hidden')) {
       if (!searchDropdown.contains(e.target) && !searchForm.contains(e.target)) {
         closeSearchDropdown();
@@ -2753,6 +2777,7 @@
 
   media.addEventListener('play', () => {
     startVuMeterLoop();
+    syncVideoScreenState(false);
   });
 
   media.addEventListener('playing', () => {
@@ -2763,6 +2788,7 @@
     updatePlayButtonUI();
     startVuMeterLoop();
     startPlaytimeTracker();
+    syncVideoScreenState(false);
     pushPlaybackState();
   });
 
@@ -2770,20 +2796,36 @@
     stopPlaytimeTracker();
     updatePlayButtonUI();
     decayVuMeterToIdle();
+    syncVideoScreenState(false);
     pushPlaybackState();
+  });
+
+  media.addEventListener('seeked', () => {
+    syncVideoScreenState(true);
   });
 
   media.addEventListener('ended', () => {
     stopPlaytimeTracker();
     updatePlayButtonUI();
     decayVuMeterToIdle();
+    syncVideoScreenState(false);
     playNext(true);
   });
+
+  if (videoScreen) {
+    videoScreen.addEventListener('loadedmetadata', () => {
+      syncVideoScreenState(true);
+    });
+    videoScreen.addEventListener('canplay', () => {
+      syncVideoScreenState(false);
+    });
+  }
 
   media.addEventListener('timeupdate', () => {
     if (!media.paused && !media.ended) {
       flushSessionPlayTime();
       updatePlaytimeUI();
+      syncVideoScreenState(false);
     }
     if (state.isSeeking) return;
     const tr = state.playlist[state.currentIndex];
