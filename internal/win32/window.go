@@ -593,19 +593,8 @@ func (c *Controller) SetClientSize(logicalW, logicalH int, animate bool) {
 	physW := (logicalW*dpi + 48) / 96
 	physH := (logicalH*dpi + 48) / 96
 
-	style := getWindowLongPtr(c.hwnd, gwlStyle)
-	style &^= (wsCaption | wsThickFrame | wsMaximizeBox)
-	exStyle := getWindowLongPtr(c.hwnd, gwlExStyle)
-	r := rect{Left: 0, Top: 0, Right: int32(physW), Bottom: int32(physH)}
-
-	if procAdjustWindowRectExForDpi.Find() == nil {
-		procAdjustWindowRectExForDpi.Call(uintptr(unsafe.Pointer(&r)), style, 0, exStyle, uintptr(dpi))
-	} else {
-		procAdjustWindowRectEx.Call(uintptr(unsafe.Pointer(&r)), style, 0, exStyle)
-	}
-
-	winW := r.Right - r.Left
-	winH := r.Bottom - r.Top
+	winW := int32(physW)
+	winH := int32(physH)
 
 	if c.hidden || c.trayAnim.mode != trayAnimNone {
 		c.savedRect.Right = c.savedRect.Left + winW
