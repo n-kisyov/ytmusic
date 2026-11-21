@@ -617,10 +617,11 @@ func (r *Resolver) resolveCatalogWithYtDlp(ctx context.Context, bin, videoID str
 		}
 	}
 
-	if len(cat.AudioFormats) == 0 && len(cat.VideoFormats) == 0 && len(cat.Progressive) == 0 {
-		return TrackCatalog{}, errors.New("yt-dlp -J returned no usable formats")
+	filtered, ok := r.filterPlayableCatalog(ctx, cat)
+	if !ok {
+		return TrackCatalog{}, errors.New("yt-dlp -J returned no playable formats")
 	}
-	return cat, nil
+	return filtered, nil
 }
 
 func (r *Resolver) resolveWithYtDlp(ctx context.Context, bin, videoID string) (ResolvedStream, error) {
@@ -864,15 +865,8 @@ func (r *Resolver) resolveCatalogWithInnerTube(ctx context.Context, videoID stri
 			}
 		}
 
-		// Verify a representative URL once to confirm upstream CDN reachability with cl.userAgent.
-		var probeURL string
-		if len(cat.AudioFormats) > 0 {
-			probeURL = cat.AudioFormats[0].URL
-		} else if len(cat.Progressive) > 0 {
-			probeURL = cat.Progressive[0].URL
-		}
-		if probeURL != "" && r.probeStreamURL(ctx, probeURL, cl.userAgent) {
-			return cat, nil
+		if filtered, ok := r.filterPlayableCatalog(ctx, cat); ok {
+			return filtered, nil
 		}
 		lastErr = errors.New("no playable format URL passed probe")
 	}
@@ -880,6 +874,48 @@ func (r *Resolver) resolveCatalogWithInnerTube(ctx context.Context, videoID stri
 		lastErr = errors.New("failed to resolve stream URL")
 	}
 	return TrackCatalog{}, lastErr
+}
+
+// filterPlayableCatalog verifies adaptive and progressive streams accept open-ended Range requests
+// (as sent by Chromium/WebView2) and strips gated adaptive streams so playback falls back cleanly.
+func (r *Resolver) filterPlayableCatalog(ctx context.Context, cat TrackCatalog) (TrackCatalog, bool) {
+	if len(cat.AudioFormats) > 0 {
+		bestAudio, hasAudio := pickBestAudio(cat.AudioFormats)
+		if hasAudio && r.probeStreamURL(ctx, bestAudio.URL, bestAudio.UserAgent) {
+			if len(cat.VideoFormats) > 0 {
+				if repVid, hasVid := pickRepresentativeVideo(cat.VideoFormats); !hasVid || !r.probeStreamURL(ctx, repVid.URL, repVid.UserAgent) {
+					cat.VideoFormats = nil
+				}
+			}
+			return cat, true
+		}
+		// Adaptive audio is gated (e.g. HTTP 403 without PO token); drop adaptive streams and check progressive.
+		cat.AudioFormats = nil
+		cat.VideoFormats = nil
+	}
+
+	if bestProg, hasProg := pickBestProgressive(cat.Progressive); hasProg && r.probeStreamURL(ctx, bestProg.URL, bestProg.UserAgent) {
+		return cat, true
+	}
+	return TrackCatalog{}, false
+}
+
+func pickRepresentativeVideo(list []FormatStream) (FormatStream, bool) {
+	if len(list) == 0 {
+		return FormatStream{}, false
+	}
+	repSel := SelectStreams(TrackCatalog{VideoFormats: list}, true, defaultQuality)
+	for _, f := range list {
+		if repSel.VideoURL != "" && f.URL == repSel.VideoURL {
+			return f, true
+		}
+	}
+	for _, f := range list {
+		if f.URL != "" {
+			return f, true
+		}
+	}
+	return FormatStream{}, false
 }
 
 func parseHeightFromLabel(label string) int {
@@ -902,7 +938,8 @@ func (r *Resolver) probeStreamURL(ctx context.Context, streamURL, ua string) boo
 	if err != nil {
 		return false
 	}
-	req.Header.Set("Range", "bytes=0-1")
+	// Open-ended range matches Chromium/WebView2 media requests and exposes PO-token 403 gates immediately.
+	req.Header.Set("Range", "bytes=0-")
 	req.Header.Set("User-Agent", ua)
 	resp, err := r.httpClient.Do(req)
 	if err != nil {

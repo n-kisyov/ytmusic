@@ -233,3 +233,47 @@ func TestSelectStreamsDefault720AndFallbackAnd1080Preference(t *testing.T) {
 		t.Fatalf("expected 3 unique qualities sorted descending, got %+v", hdVid.AvailableQualities)
 	}
 }
+
+func TestFilterPlayableCatalogFallsBackToProgressiveOnOpenRangeGate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/adaptive-audio", "/adaptive-video":
+			// Simulate YouTube PO-token gate: tiny byte slice works, open-ended bytes=0- returns 403.
+			if r.Header.Get("Range") == "bytes=0-" {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			w.WriteHeader(http.StatusPartialContent)
+		case "/progressive":
+			w.Header().Set("Content-Type", "video/mp4")
+			w.WriteHeader(http.StatusPartialContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	resolver := NewResolver(nil)
+	raw := TrackCatalog{
+		AudioFormats: []FormatStream{{
+			Itag: 140, URL: srv.URL + "/adaptive-audio", Kind: "audio", BitrateKbps: 130, IsAAC: true,
+		}},
+		VideoFormats: []FormatStream{{
+			Itag: 136, URL: srv.URL + "/adaptive-video", Kind: "video", Height: 720, BitrateKbps: 900, IsH264: true,
+		}},
+		Progressive: []FormatStream{{
+			Itag: 18, URL: srv.URL + "/progressive", Kind: "progressive", Height: 360, BitrateKbps: 380, IsH264: true, IsAAC: true,
+		}},
+	}
+
+	filtered, ok := resolver.filterPlayableCatalog(context.Background(), raw)
+	if !ok {
+		t.Fatalf("expected progressive fallback to succeed")
+	}
+	if len(filtered.AudioFormats) != 0 || len(filtered.VideoFormats) != 0 {
+		t.Fatalf("expected gated adaptive formats to be stripped, got audio=%d video=%d", len(filtered.AudioFormats), len(filtered.VideoFormats))
+	}
+	if len(filtered.Progressive) != 1 || filtered.Progressive[0].Itag != 18 {
+		t.Fatalf("expected progressive itag 18 to remain, got %+v", filtered.Progressive)
+	}
+}
