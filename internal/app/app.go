@@ -1301,6 +1301,26 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		return err
 	}
 
+	if err := w.Bind("backendMinimize", func() error {
+		w.Dispatch(func() {
+			if a.winCtrl != nil {
+				a.winCtrl.MinimizeToTray()
+			}
+		})
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendStartWindowDrag", func() error {
+		if a.winCtrl != nil {
+			a.winCtrl.StartDrag()
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+
 	return nil
 }
 
