@@ -2874,6 +2874,23 @@
     authPopover.classList.add('hidden');
   });
 
+  if (minimizeBtn) {
+    minimizeBtn.addEventListener('click', () => {
+      if (window.backendMinimize) {
+        window.backendMinimize();
+      }
+    });
+  }
+
+  if (topBar) {
+    topBar.addEventListener('mousedown', (e) => {
+      if (e.target.closest('input, button, a, .search-box, .search-dropdown, .auth-popover')) return;
+      if (e.button === 0 && window.backendStartWindowDrag) {
+        window.backendStartWindowDrag();
+      }
+    });
+  }
+
   quitBtn.addEventListener('click', async () => {
     await pushPlaybackState();
     window.backendQuitApp();
