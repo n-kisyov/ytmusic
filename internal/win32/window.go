@@ -324,7 +324,7 @@ func ComputeInitialWindowRect(savedX, savedY, logicalW, logicalH int) (int32, in
 	physW := (logicalW*dpi + 48) / 96
 	physH := (logicalH*dpi + 48) / 96
 
-	style := uintptr(0x00CF0000) &^ (wsThickFrame | wsMaximizeBox)
+	style := uintptr(0x00CF0000) &^ (wsCaption | wsThickFrame | wsMaximizeBox)
 	exStyle := uintptr(wsExLayered)
 	r := rect{Left: 0, Top: 0, Right: int32(physW), Bottom: int32(physH)}
 	if procAdjustWindowRectExForDpi.Find() == nil {
