@@ -570,16 +570,18 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		return err
 	}
 
-	if err := w.Bind("backendSelectTrack", func(index int) (string, error) {
+	if err := w.Bind("backendSelectTrack", func(index int) (streamSelectionPayload, error) {
 		a.mu.Lock()
 		if index < 0 || index >= len(a.state.Playlist) {
 			a.mu.Unlock()
-			return "", fmt.Errorf("track index %d out of range", index)
+			return streamSelectionPayload{}, fmt.Errorf("track index %d out of range", index)
 		}
 		tr := a.state.Playlist[index]
 		a.state.CurrentIndex = index
 		a.state.CurrentTrackID = tr.ID
 		a.state.PositionSec = 0
+		videoEnabled := a.state.VideoEnabled
+		prefQ := a.state.VideoQuality
 		a.updateTrayTitleLocked()
 		if index+1 < len(a.state.Playlist) {
 			a.resolver.Prefetch(a.state.Playlist[index+1].ID)
@@ -588,15 +590,60 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		a.mu.Unlock()
 
 		_ = config.SaveAppState(snapshot)
-		return a.server.StreamURL(tr.ID), nil
+		return a.buildStreamSelection(tr.ID, videoEnabled, prefQ), nil
 	}); err != nil {
 		return err
 	}
 
-	if err := w.Bind("backendToggleVideo", func(enabled bool) error {
+	if err := w.Bind("backendGetCurrentStreamInfo", func() (streamSelectionPayload, error) {
+		a.mu.Lock()
+		if a.state.CurrentIndex < 0 || a.state.CurrentIndex >= len(a.state.Playlist) {
+			a.mu.Unlock()
+			return streamSelectionPayload{}, nil
+		}
+		tr := a.state.Playlist[a.state.CurrentIndex]
+		videoEnabled := a.state.VideoEnabled
+		prefQ := a.state.VideoQuality
+		a.mu.Unlock()
+		return a.buildStreamSelection(tr.ID, videoEnabled, prefQ), nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendSetVideoQuality", func(quality int) (streamSelectionPayload, error) {
+		switch quality {
+		case 144, 240, 360, 480, 720, 1080, 1440, 2160:
+		default:
+			quality = 720
+		}
+		a.mu.Lock()
+		a.state.VideoQuality = quality
+		var trackID string
+		if a.state.CurrentIndex >= 0 && a.state.CurrentIndex < len(a.state.Playlist) {
+			trackID = a.state.Playlist[a.state.CurrentIndex].ID
+		}
+		videoEnabled := a.state.VideoEnabled
+		snapshot := a.cloneStateLocked()
+		a.mu.Unlock()
+
+		_ = config.SaveAppState(snapshot)
+		if trackID == "" {
+			return streamSelectionPayload{RequestedQuality: quality, ActiveQuality: quality}, nil
+		}
+		return a.buildStreamSelection(trackID, videoEnabled, quality), nil
+	}); err != nil {
+		return err
+	}
+
+	if err := w.Bind("backendToggleVideo", func(enabled bool) (streamSelectionPayload, error) {
 		a.mu.Lock()
 		a.state.VideoEnabled = enabled
 		targetH := computeTargetHeight(a.state.VideoEnabled, a.state.PlaylistExpanded)
+		var trackID string
+		if a.state.CurrentIndex >= 0 && a.state.CurrentIndex < len(a.state.Playlist) {
+			trackID = a.state.Playlist[a.state.CurrentIndex].ID
+		}
+		prefQ := a.state.VideoQuality
 		snapshot := a.cloneStateLocked()
 		a.mu.Unlock()
 
@@ -606,7 +653,10 @@ func (a *App) bindMethods(w webview2.WebView) error {
 				a.winCtrl.SetClientSize(fixedWidth, targetH, true)
 			})
 		}
-		return nil
+		if trackID == "" {
+			return streamSelectionPayload{RequestedQuality: prefQ}, nil
+		}
+		return a.buildStreamSelection(trackID, enabled, prefQ), nil
 	}); err != nil {
 		return err
 	}
@@ -1442,4 +1492,82 @@ func computeTargetHeight(videoEnabled, playlistExpanded bool) int {
 		h += playlistHeight
 	}
 	return h
+}
+
+func (a *App) buildStreamSelection(videoID string, videoEnabled bool, prefQuality int) streamSelectionPayload {
+	if prefQuality <= 0 {
+		prefQuality = 720
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+	defer cancel()
+
+	sel, err := a.resolver.ResolveCatalogSelection(ctx, videoID, videoEnabled, prefQuality)
+	if err != nil {
+		var vidURL string
+		if videoEnabled {
+			vidURL = a.server.StreamVariantURL(videoID, "video", prefQuality)
+		}
+		return streamSelectionPayload{
+			AudioURL:         a.server.StreamVariantURL(videoID, "audio", prefQuality),
+			VideoURL:         vidURL,
+			RequestedQuality: prefQuality,
+			ActiveQuality:    prefQuality,
+		}
+	}
+
+	return selectionToPayload(a.server, videoID, videoEnabled, sel)
+}
+
+func selectionToPayload(srv *player.Server, videoID string, videoEnabled bool, sel player.StreamSelection) streamSelectionPayload {
+	out := streamSelectionPayload{
+		AudioKbps:          sel.AudioBitrateKbps,
+		VideoKbps:          sel.VideoBitrateKbps,
+		RequestedQuality:   sel.RequestedQuality,
+		ActiveQuality:      sel.ActiveQuality,
+		ProgressiveOnly:    sel.ProgressiveOnly,
+		AvailableQualities: sel.AvailableQualities,
+	}
+	if srv != nil {
+		if sel.ProgressiveOnly {
+			out.AudioURL = srv.StreamURL(videoID)
+		} else {
+			out.AudioURL = srv.StreamVariantURL(videoID, "audio", sel.RequestedQuality)
+			if videoEnabled && sel.VideoURL != "" {
+				q := sel.ActiveQuality
+				if q <= 0 {
+					q = sel.RequestedQuality
+				}
+				out.VideoURL = srv.StreamVariantURL(videoID, "video", q)
+			}
+		}
+	}
+	return out
+}
+
+func (a *App) broadcastCurrentStreamInfo(w webview2.WebView, videoID string) {
+	if w == nil || videoID == "" {
+		return
+	}
+	a.mu.Lock()
+	videoEnabled := a.state.VideoEnabled
+	prefQ := a.state.VideoQuality
+	a.mu.Unlock()
+
+	info := a.buildStreamSelection(videoID, videoEnabled, prefQ)
+
+	// Confirm the active track didn't change while resolving.
+	a.mu.Lock()
+	var currentID string
+	if a.state.CurrentIndex >= 0 && a.state.CurrentIndex < len(a.state.Playlist) {
+		currentID = a.state.Playlist[a.state.CurrentIndex].ID
+	}
+	a.mu.Unlock()
+	if currentID != videoID {
+		return
+	}
+
+	raw, _ := json.Marshal(info)
+	w.Dispatch(func() {
+		w.Eval("window.__onStreamInfoUpdated && window.__onStreamInfoUpdated(" + string(raw) + ")")
+	})
 }
