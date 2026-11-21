@@ -110,6 +110,17 @@ html, body {
   padding: 7px 10px;
   border-bottom: 1px solid var(--yt-border);
   background: var(--yt-bg-base);
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+.search-box,
+.icon-btn,
+button,
+input,
+.search-dropdown,
+.auth-popover {
+  -webkit-app-region: no-drag;
 }
 
 .search-box {
