@@ -598,6 +598,7 @@ func (c *Controller) SetClientSize(logicalW, logicalH int, animate bool) {
 	physH := (logicalH*dpi + 48) / 96
 
 	style := getWindowLongPtr(c.hwnd, gwlStyle)
+	style &^= (wsCaption | wsThickFrame | wsMaximizeBox)
 	exStyle := getWindowLongPtr(c.hwnd, gwlExStyle)
 	r := rect{Left: 0, Top: 0, Right: int32(physW), Bottom: int32(physH)}
 
