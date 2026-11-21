@@ -27,38 +27,39 @@ func TestDiagLiveStreams(t *testing.T) {
 			continue
 		}
 		sel := SelectStreams(cat, true, 720)
-		fmt.Printf("=== %s Audio=%d Video=%d Prog=%d UA=%q SelectedA=%dkbps(itag=%d) SelectedV=%dkbps(%dp, itag=%d)\n",
-			id, len(cat.AudioFormats), len(cat.VideoFormats), len(cat.Progressive), cat.UserAgent,
-			sel.AudioBitrateKbps, findItag(cat.AudioFormats, sel.AudioURL),
-			sel.VideoBitrateKbps, sel.ActiveQuality, findItag(cat.VideoFormats, sel.VideoURL),
+		af := findFmt(cat.AudioFormats, sel.AudioURL)
+		vf := findFmt(cat.VideoFormats, sel.VideoURL)
+		fmt.Printf("=== %s Audio=%d Video=%d Prog=%d\n  SelA: itag=%d %dkbps mime=%q ua=%q\n  SelV: itag=%d %dkbps %dp mime=%q ua=%q\n",
+			id, len(cat.AudioFormats), len(cat.VideoFormats), len(cat.Progressive),
+			af.Itag, sel.AudioBitrateKbps, af.MimeType, sel.AudioUserAgent,
+			vf.Itag, sel.VideoBitrateKbps, sel.ActiveQuality, vf.MimeType, sel.VideoUserAgent,
 		)
-		for _, kind := range []string{"audio", "video"} {
-			q := 0
-			if kind == "video" {
-				q = 720
-			}
-			u := srv.StreamVariantURL(id, kind, q)
+		for _, tc := range []struct {
+			kind string
+			q    int
+		}{{"audio", 0}, {"video", 720}, {"", 0}} {
+			u := srv.StreamVariantURL(id, tc.kind, tc.q)
 			req, _ := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 			req.Header.Set("Range", "bytes=0-1023")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
-				fmt.Printf("  proxy %s ERR: %v\n", kind, err)
+				fmt.Printf("  proxy kind=%q q=%d ERR: %v\n", tc.kind, tc.q, err)
 				continue
 			}
 			body, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			fmt.Printf("  proxy %s status=%d ct=%q cl=%q cr=%q bytes=%d\n",
-				kind, resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Content-Length"), resp.Header.Get("Content-Range"), len(body))
+			fmt.Printf("  proxy kind=%q q=%d status=%d ct=%q cl=%q cr=%q bytes=%d\n",
+				tc.kind, tc.q, resp.StatusCode, resp.Header.Get("Content-Type"), resp.Header.Get("Content-Length"), resp.Header.Get("Content-Range"), len(body))
 		}
 		cancel()
 	}
 }
 
-func findItag(fmts []FormatStream, u string) int {
+func findFmt(fmts []FormatStream, u string) FormatStream {
 	for _, f := range fmts {
 		if f.URL == u {
-			return f.Itag
+			return f
 		}
 	}
-	return -1
+	return FormatStream{}
 }
