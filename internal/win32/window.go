@@ -891,3 +891,22 @@ func setWindowLongPtr(hwnd uintptr, idx uintptr, val uintptr) uintptr {
 	r, _, _ := procSetWindowLongPtrW.Call(hwnd, idx, val)
 	return r
 }
+
+// OpenExternalURL opens an http/https URL using the default Windows shell browser.
+func OpenExternalURL(rawURL string) error {
+	trimmed := strings.TrimSpace(rawURL)
+	lower := strings.ToLower(trimmed)
+	if !strings.HasPrefix(lower, "https://") && !strings.HasPrefix(lower, "http://") {
+		return fmt.Errorf("unsupported URL scheme")
+	}
+	verb, _ := windows.UTF16PtrFromString("open")
+	target, err := windows.UTF16PtrFromString(trimmed)
+	if err != nil {
+		return err
+	}
+	ret, _, _ := procShellExecuteW.Call(0, uintptr(unsafe.Pointer(verb)), uintptr(unsafe.Pointer(target)), 0, 0, 1 /* SW_SHOWNORMAL */)
+	if ret <= 32 {
+		return fmt.Errorf("ShellExecuteW failed with code %d", ret)
+	}
+	return nil
+}
