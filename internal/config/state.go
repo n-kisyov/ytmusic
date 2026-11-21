@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,6 +219,8 @@ func LoadAppStateFrom(path string) (AppState, error) {
 		return state, nil
 	}
 	if err := json.Unmarshal(data, &state); err != nil {
+		bakPath := fmt.Sprintf("%s.corrupt.%d.bak", path, time.Now().Unix())
+		_ = os.WriteFile(bakPath, data, 0o600)
 		return DefaultAppState(), fmt.Errorf("parse state file: %w", err)
 	}
 	normalizeAppState(&state)
@@ -262,7 +265,7 @@ func normalizeAppState(s *AppState) {
 	default:
 		s.EQPreset = "flat"
 	}
-	if s.PlaybackRate < 0.5 || s.PlaybackRate > 2.0 {
+	if math.IsNaN(s.PlaybackRate) || math.IsInf(s.PlaybackRate, 0) || s.PlaybackRate < 0.5 || s.PlaybackRate > 2.0 {
 		s.PlaybackRate = 1.0
 	}
 	switch s.VideoQuality {
@@ -273,7 +276,7 @@ func normalizeAppState(s *AppState) {
 	if s.RecentSearches == nil {
 		s.RecentSearches = []string{}
 	}
-	if s.Volume < 0 || s.Volume > 1 {
+	if math.IsNaN(s.Volume) || math.IsInf(s.Volume, 0) || s.Volume < 0 || s.Volume > 1 {
 		s.Volume = 0.8
 	}
 	if s.TotalPlayTimeSec < 0 {
@@ -289,8 +292,9 @@ func normalizeAppState(s *AppState) {
 	if s.CurrentIndex < -1 || s.CurrentIndex >= len(s.Playlist) {
 		s.CurrentIndex = -1
 	}
-	// Re-sync index by track ID if possible.
+	// Re-sync index by track ID if possible; do not attach stale position/play state to an unrelated track.
 	if s.CurrentTrackID != "" && (s.CurrentIndex < 0 || s.Playlist[s.CurrentIndex].ID != s.CurrentTrackID) {
+		s.CurrentIndex = -1
 		for i, t := range s.Playlist {
 			if t.ID == s.CurrentTrackID {
 				s.CurrentIndex = i
@@ -300,8 +304,12 @@ func normalizeAppState(s *AppState) {
 	}
 	if s.CurrentIndex >= 0 && s.CurrentIndex < len(s.Playlist) {
 		s.CurrentTrackID = s.Playlist[s.CurrentIndex].ID
+	} else {
+		s.CurrentTrackID = ""
+		s.PositionSec = 0
+		s.WasPlaying = false
 	}
-	if s.PositionSec < 0 {
+	if math.IsNaN(s.PositionSec) || math.IsInf(s.PositionSec, 0) || s.PositionSec < 0 {
 		s.PositionSec = 0
 	}
 }

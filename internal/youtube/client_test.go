@@ -412,3 +412,88 @@ func TestSuggestQueries(t *testing.T) {
 		t.Fatalf("expected 3 deduplicated suggestions, got %+v", suggestions)
 	}
 }
+
+func TestBrowseAndNextContinuationRoutingAndSecondaryIsolation(t *testing.T) {
+	var hitEndpoints []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitEndpoints = append(hitEndpoints, r.URL.Path)
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		cont, _ := body["continuation"].(string)
+
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/youtubei/v1/browse" && cont == "":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"contents": map[string]any{
+					"twoColumnBrowseResultsRenderer": map[string]any{
+						"contents": []any{
+							map[string]any{"playlistVideoRenderer": map[string]any{"videoId": "pl_1", "title": map[string]any{"simpleText": "Song 1"}, "shortBylineText": map[string]any{"simpleText": "Artist"}, "lengthSeconds": "200"}},
+							map[string]any{"continuationItemRenderer": map[string]any{"continuationEndpoint": map[string]any{"continuationCommand": map[string]any{"token": "BROWSE_CONT_2"}}}},
+						},
+					},
+				},
+			})
+		case r.URL.Path == "/youtubei/v1/browse" && cont == "BROWSE_CONT_2":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"onResponseReceivedActions": []any{
+					map[string]any{"playlistVideoRenderer": map[string]any{"videoId": "pl_2", "title": map[string]any{"simpleText": "Song 2"}, "shortBylineText": map[string]any{"simpleText": "Artist"}, "lengthSeconds": "210"}},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	defer srv.Close()
+
+	client := NewClient(srv.Client())
+	client.SetBaseURL(srv.URL)
+
+	res, _, err := client.ResolveURLPlaylist(context.Background(), "https://www.youtube.com/playlist?list=PLtest123", 30)
+	if err != nil {
+		t.Fatalf("ResolveURLPlaylist failed: %v", err)
+	}
+	if len(res.Tracks) != 2 || res.Tracks[0].ID != "pl_1" || res.Tracks[1].ID != "pl_2" {
+		t.Fatalf("expected browse continuation routed to /browse (pl_1, pl_2), got %+v hits=%v", res.Tracks, hitEndpoints)
+	}
+
+	// Verify WatchNext prefers playlist over secondaryResults even across map iterations.
+	watchNext := map[string]any{
+		"contents": map[string]any{
+			"twoColumnWatchNextResults": map[string]any{
+				"secondaryResults": map[string]any{
+					"secondaryResults": map[string]any{
+						"results": []any{
+							map[string]any{"compactVideoRenderer": map[string]any{"videoId": "sidebar_noise", "title": map[string]any{"simpleText": "Noise"}, "shortBylineText": map[string]any{"simpleText": "Other"}, "lengthSeconds": "60"}},
+							map[string]any{"continuationItemRenderer": map[string]any{"continuationEndpoint": map[string]any{"continuationCommand": map[string]any{"token": "SIDEBAR_TOK"}}}},
+						},
+					},
+				},
+				"playlist": map[string]any{
+					"playlist": map[string]any{
+						"contents": []any{
+							map[string]any{"playlistPanelVideoRenderer": map[string]any{"videoId": "mix_1", "title": map[string]any{"simpleText": "Mix 1"}, "shortBylineText": map[string]any{"simpleText": "Artist"}, "lengthSeconds": "190"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	for i := 0; i < 10; i++ {
+		trks, tok := extractTracksAndToken(watchNext)
+		if len(trks) != 1 || trks[0].ID != "mix_1" || tok != "" {
+			t.Fatalf("iteration %d: expected only mix_1 and empty sidebar token, got tracks=%+v tok=%q", i, trks, tok)
+		}
+	}
+
+	// Verify markAndMergeAccounts preserves ChannelHandle when Handle is empty, matches AuthUser when PageID=="", and resets stale fallback PageID.
+	accs := []config.BrandAccount{
+		{Name: "Personal", PageID: "", Handle: "", AuthUser: "0"},
+		{Name: "Work", PageID: "", Handle: "", AuthUser: "1"},
+	}
+	prof := AccountProfile{ActivePageID: "DELETED_PAGE", AuthUser: "1", ChannelHandle: "@keep"}
+	markAndMergeAccounts(accs, &prof, true)
+	if prof.ChannelHandle != "@keep" || prof.ActivePageID != "" || !prof.Accounts[1].Selected {
+		t.Fatalf("unexpected account merge result: prof=%+v accounts=%+v", prof, prof.Accounts)
+	}
+}

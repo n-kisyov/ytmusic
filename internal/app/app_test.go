@@ -77,4 +77,14 @@ func TestAppTrailingPlaytimeAndResetStats(t *testing.T) {
 	if !strings.HasSuffix(fullTip, stats) {
 		t.Fatalf("expected tray tooltip to preserve stats suffix, got %q", fullTip)
 	}
+
+	// Verify ResetPlayTimeStats increments statsEpoch and refreshAccountProfileSync errors when signed out.
+	prevEpoch := a.statsEpoch
+	a.ResetPlayTimeStats()
+	if a.statsEpoch != prevEpoch+1 {
+		t.Fatalf("expected statsEpoch incremented from %d to %d, got %d", prevEpoch, prevEpoch+1, a.statsEpoch)
+	}
+	if err := a.refreshAccountProfileSync(); err == nil {
+		t.Fatalf("expected refreshAccountProfileSync error when signed out")
+	}
 }

@@ -138,6 +138,10 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 
 		resp, err = s.proxyHTTP.Do(req)
 		if err != nil {
+			// Client seek/scrub/track-switch cancellation must not wipe cached catalogs.
+			if errors.Is(err, context.Canceled) || r.Context().Err() != nil {
+				return
+			}
 			if attempt == 0 {
 				s.resolver.Invalidate(videoID)
 				continue

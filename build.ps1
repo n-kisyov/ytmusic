@@ -25,6 +25,8 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 $RootDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$prevGOOS = $env:GOOS
+$prevGOARCH = $env:GOARCH
 Push-Location $RootDir
 
 try {
@@ -52,9 +54,10 @@ try {
         Write-Host "==> Cleaning previous build artifacts..." -ForegroundColor Yellow
         if (Test-Path $binDir) { Remove-Item -Recurse -Force $binDir }
         if (Test-Path $rootExe) { Remove-Item -Force $rootExe }
-        $sysoFile = Join-Path $RootDir "cmd\ytmusic\rsrc_windows_amd64.syso"
-        if (Test-Path $sysoFile) { Remove-Item -Force $sysoFile }
     }
+
+    $env:GOOS = "windows"
+    $env:GOARCH = "amd64"
 
     Write-Host "==> Syncing Go module dependencies (go mod tidy)..." -ForegroundColor Cyan
     & go mod tidy
@@ -71,9 +74,6 @@ try {
     }
 
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-
-    $env:GOOS = "windows"
-    $env:GOARCH = "amd64"
 
     if ($DebugMode) {
         Write-Host "==> Building debug binary (console enabled)..." -ForegroundColor Cyan
@@ -186,5 +186,7 @@ public static class ShellIconRefresh {
         }
     }
 } finally {
+    if ($null -eq $prevGOOS) { Remove-Item Env:\GOOS -ErrorAction SilentlyContinue } else { $env:GOOS = $prevGOOS }
+    if ($null -eq $prevGOARCH) { Remove-Item Env:\GOARCH -ErrorAction SilentlyContinue } else { $env:GOARCH = $prevGOARCH }
     Pop-Location
 }

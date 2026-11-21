@@ -28,3 +28,4 @@ go.work.sum
 capture-screenshots.ps1
 scripts/
 .screenshot_tmp/
+.cli_test_appdata/

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -162,8 +163,8 @@ func (c *Client) SearchInitialPlaylist(ctx context.Context, query string, target
 		mixTracks, mixToken, err := c.fetchNextMix(ctx, tracks[0].ID, "")
 		if err == nil && len(mixTracks) > 0 {
 			tracks = appendUniqueTracks(tracks, mixTracks, seen)
-			if token == "" {
-				token = mixToken
+			if token == "" && mixToken != "" {
+				token = prefixContinuation("next", mixToken)
 			}
 		}
 	}
@@ -208,20 +209,26 @@ func (c *Client) FetchMoreSongs(ctx context.Context, continuationToken, seedVide
 
 	token := continuationToken
 	if token != "" {
-		page, err := c.postSearch(ctx, map[string]any{
+		source, endpoint, rawTok := parseContinuation(token)
+		page, err := c.postInnerTube(ctx, endpoint, map[string]any{
 			"context":      c.buildContext(),
-			"continuation": token,
+			"continuation": rawTok,
 		})
-		if err == nil {
-			moreTracks, nextToken := extractTracksAndToken(page)
-			collected = appendUniqueTracks(collected, moreTracks, seen)
-			token = nextToken
-		} else {
-			token = ""
+		if err != nil {
+			if len(collected) > 0 {
+				return SearchResult{
+					Tracks:            collected,
+					ContinuationToken: token,
+				}, nil
+			}
+			return SearchResult{}, err
 		}
+		moreTracks, nextToken := extractTracksAndToken(page)
+		collected = appendUniqueTracks(collected, moreTracks, seen)
+		token = prefixContinuation(source, nextToken)
 	}
 
-	// Fallback to /youtubei/v1/next Radio Mix if continuation yielded nothing or was exhausted.
+	// Fallback to /youtubei/v1/next Radio Mix only when continuation is exhausted.
 	if (len(collected) == 0 || (len(collected) < 5 && token == "")) && seedVideoID != "" {
 		mixTracks, mixToken, err := c.fetchNextMix(ctx, seedVideoID, "")
 		if err != nil {
@@ -231,7 +238,7 @@ func (c *Client) FetchMoreSongs(ctx context.Context, continuationToken, seedVide
 		} else {
 			collected = appendUniqueTracks(collected, mixTracks, seen)
 			if token == "" && mixToken != "" {
-				token = mixToken
+				token = prefixContinuation("next", mixToken)
 			}
 		}
 	}
@@ -307,7 +314,7 @@ func (c *Client) ResolveURLPlaylist(ctx context.Context, rawURL string, targetCo
 		if videoID != "" {
 			mixTracks, mixToken, errNext := c.fetchNextMixList(ctx, videoID, playlistID)
 			if errNext == nil && len(mixTracks) > 0 {
-				return c.trimAndStoreOverflow(mixTracks, mixToken, targetCount), "Loaded YouTube playlist", nil
+				return c.trimAndStoreOverflow(mixTracks, prefixContinuation("next", mixToken), targetCount), "Loaded YouTube playlist", nil
 			}
 		}
 	}
@@ -361,7 +368,7 @@ func (c *Client) StartRadioMix(ctx context.Context, seedVideoID string, seedTrac
 		}
 	}
 
-	return c.trimAndStoreOverflow(tracks, token, targetCount), nil
+	return c.trimAndStoreOverflow(tracks, prefixContinuation("next", token), targetCount), nil
 }
 
 func (c *Client) trimAndStoreOverflow(tracks []config.Track, token string, targetCount int) SearchResult {
@@ -422,7 +429,7 @@ func (c *Client) fetchBrowsePlaylist(ctx context.Context, playlistID, startVideo
 		}
 	}
 
-	return c.trimAndStoreOverflow(tracks, token, targetCount), nil
+	return c.trimAndStoreOverflow(tracks, prefixContinuation("browse", token), targetCount), nil
 }
 
 func (c *Client) fetchVideoDetailsTrack(ctx context.Context, videoID string) (config.Track, error) {
@@ -543,6 +550,34 @@ func (c *Client) SuggestQueries(ctx context.Context, query string) ([]string, er
 	return out, nil
 }
 
+func prefixContinuation(source, tok string) string {
+	tok = strings.TrimSpace(tok)
+	if tok == "" {
+		return ""
+	}
+	if strings.HasPrefix(tok, "browse:") || strings.HasPrefix(tok, "next:") {
+		return tok
+	}
+	switch source {
+	case "browse", "next":
+		return source + ":" + tok
+	default:
+		return tok
+	}
+}
+
+func parseContinuation(raw string) (source, endpoint, tok string) {
+	raw = strings.TrimSpace(raw)
+	switch {
+	case strings.HasPrefix(raw, "browse:"):
+		return "browse", "/youtubei/v1/browse?prettyPrint=false", strings.TrimPrefix(raw, "browse:")
+	case strings.HasPrefix(raw, "next:"):
+		return "next", "/youtubei/v1/next?prettyPrint=false", strings.TrimPrefix(raw, "next:")
+	default:
+		return "search", "/youtubei/v1/search?prettyPrint=false", strings.TrimPrefix(raw, "search:")
+	}
+}
+
 func (c *Client) fetchNextMix(ctx context.Context, videoID, continuation string) ([]config.Track, string, error) {
 	return c.fetchNextMixList(ctx, videoID, "RD"+videoID, continuation)
 }
@@ -556,7 +591,8 @@ func (c *Client) fetchNextMixList(ctx context.Context, videoID, playlistID strin
 		"context": c.buildContext(),
 	}
 	if continuation != "" {
-		payload["continuation"] = continuation
+		_, _, rawTok := parseContinuation(continuation)
+		payload["continuation"] = rawTok
 	} else {
 		payload["videoId"] = videoID
 		if playlistID != "" {
@@ -727,8 +763,27 @@ func extractTracksAndToken(root any) ([]config.Track, string) {
 		return ""
 	}
 
-	var walk func(node any)
-	walk = func(node any) {
+	// Primary keys are visited first in deterministic order; secondary recommendation rails are deferred.
+	primaryKeyOrder := []string{
+		"onResponseReceivedCommands",
+		"onResponseReceivedActions",
+		"twoColumnBrowseResultsRenderer",
+		"twoColumnWatchNextResults",
+		"singleColumnWatchNextResults",
+		"playlist",
+		"playlistPanelRenderer",
+		"primaryContents",
+		"sectionListRenderer",
+		"itemSectionRenderer",
+		"playlistVideoListRenderer",
+		"contents",
+	}
+	isSecondaryKey := func(k string) bool {
+		return k == "secondaryResults" || k == "secondaryContents"
+	}
+
+	var walk func(node any, allowSecondary bool)
+	walk = func(node any, allowSecondary bool) {
 		switch v := node.(type) {
 		case map[string]any:
 			if vr, ok := v["videoRenderer"].(map[string]any); ok {
@@ -762,7 +817,7 @@ func extractTracksAndToken(root any) ([]config.Track, string) {
 				return
 			}
 			if cir, ok := v["continuationItemRenderer"].(map[string]any); ok {
-				if tok := findToken(cir); tok != "" {
+				if tok := findToken(cir); tok != "" && feedContinuation == "" {
 					feedContinuation = tok
 				}
 				return
@@ -772,17 +827,42 @@ func extractTracksAndToken(root any) ([]config.Track, string) {
 					fallbackContinuation = tok
 				}
 			}
-			for _, child := range v {
-				walk(child)
+
+			visited := make(map[string]struct{}, len(v))
+			for _, k := range primaryKeyOrder {
+				if child, exists := v[k]; exists {
+					visited[k] = struct{}{}
+					walk(child, allowSecondary)
+				}
+			}
+			rest := make([]string, 0, len(v))
+			for k := range v {
+				if _, seen := visited[k]; !seen && !isSecondaryKey(k) {
+					rest = append(rest, k)
+				}
+			}
+			sort.Strings(rest)
+			for _, k := range rest {
+				walk(v[k], allowSecondary)
+			}
+			if allowSecondary {
+				for _, k := range []string{"secondaryResults", "secondaryContents"} {
+					if child, exists := v[k]; exists && len(tracks) == 0 {
+						walk(child, true)
+					}
+				}
 			}
 		case []any:
 			for _, item := range v {
-				walk(item)
+				walk(item, allowSecondary)
 			}
 		}
 	}
 
-	walk(root)
+	walk(root, false)
+	if len(tracks) == 0 {
+		walk(root, true)
+	}
 	if feedContinuation != "" {
 		return tracks, feedContinuation
 	}

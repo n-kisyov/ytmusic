@@ -195,7 +195,7 @@ func extractIdentityTokens(m map[string]any) (pageID, authUser string) {
 	walk = func(node any) {
 		switch v := node.(type) {
 		case map[string]any:
-			if tok, ok := v["pageIdToken"].(map[string]any); ok {
+			if tok, ok := v["pageIdToken"].(map[string]any); ok && pageID == "" {
 				if pid, _ := tok["pageId"].(string); pid != "" {
 					pageID = pid
 				}
@@ -227,7 +227,7 @@ func extractIdentityTokens(m map[string]any) (pageID, authUser string) {
 		}
 	}
 	walk(m["serviceEndpoint"])
-	if pageID == "" && authUser == "" {
+	if pageID == "" || authUser == "" {
 		walk(m["navigationEndpoint"])
 	}
 	return pageID, authUser
@@ -236,14 +236,21 @@ func extractIdentityTokens(m map[string]any) (pageID, authUser string) {
 func markAndMergeAccounts(accounts []config.BrandAccount, profile *AccountProfile, forcePageIDMatch bool) {
 	selectedIdx := -1
 	ownerEmail := profile.Email
+	fellBackToPrimary := false
 	for i := range accounts {
 		if ownerEmail == "" && accounts[i].Email != "" {
 			ownerEmail = accounts[i].Email
 		}
 		if profile.ActivePageID != "" || forcePageIDMatch {
-			accounts[i].Selected = accounts[i].PageID == profile.ActivePageID
+			matched := accounts[i].PageID == profile.ActivePageID
+			if matched && profile.ActivePageID == "" && profile.AuthUser != "" && accounts[i].AuthUser != "" {
+				matched = accounts[i].AuthUser == profile.AuthUser
+			}
+			accounts[i].Selected = matched
 			if accounts[i].Selected && selectedIdx < 0 {
 				selectedIdx = i
+			} else {
+				accounts[i].Selected = false
 			}
 		} else {
 			if accounts[i].Selected && selectedIdx < 0 {
@@ -257,10 +264,21 @@ func markAndMergeAccounts(accounts []config.BrandAccount, profile *AccountProfil
 	if selectedIdx < 0 {
 		// Primary account corresponds to empty PageID when no delegated session is set.
 		for i := range accounts {
-			if accounts[i].PageID == "" {
+			if accounts[i].PageID == "" && (profile.AuthUser == "" || accounts[i].AuthUser == "" || accounts[i].AuthUser == profile.AuthUser) {
 				accounts[i].Selected = true
 				selectedIdx = i
+				fellBackToPrimary = true
 				break
+			}
+		}
+		if selectedIdx < 0 {
+			for i := range accounts {
+				if accounts[i].PageID == "" {
+					accounts[i].Selected = true
+					selectedIdx = i
+					fellBackToPrimary = true
+					break
+				}
 			}
 		}
 	}
@@ -278,18 +296,16 @@ func markAndMergeAccounts(accounts []config.BrandAccount, profile *AccountProfil
 
 	if selectedIdx >= 0 {
 		sel := accounts[selectedIdx]
-		if profile.AccountName == "" || forcePageIDMatch {
-			if sel.Name != "" {
-				profile.AccountName = sel.Name
-			}
+		if (profile.AccountName == "" || forcePageIDMatch) && sel.Name != "" {
+			profile.AccountName = sel.Name
 		}
-		if profile.ChannelHandle == "" || forcePageIDMatch {
+		if (profile.ChannelHandle == "" || forcePageIDMatch) && sel.Handle != "" {
 			profile.ChannelHandle = sel.Handle
 		}
 		if (profile.AvatarURL == "" || forcePageIDMatch) && sel.AvatarURL != "" {
 			profile.AvatarURL = sel.AvatarURL
 		}
-		if profile.ActivePageID == "" && !forcePageIDMatch {
+		if (profile.ActivePageID == "" && !forcePageIDMatch) || fellBackToPrimary {
 			profile.ActivePageID = sel.PageID
 		}
 		if sel.AuthUser != "" {

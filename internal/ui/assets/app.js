@@ -138,6 +138,9 @@
     isLoadingMore: false,
     pendingSeekSec: 0,
     playbackSeq: 0,
+    streamOpSeq: 0,
+    queueGen: 0,
+    statsEpoch: 0,
     consecutiveErrors: 0,
     errorSkipTimer: null,
     lastSyncMs: 0,
@@ -424,14 +427,21 @@
       btn.addEventListener('click', async (e) => {
         e.stopPropagation();
         closeVideoQualityMenu();
+        const prevQuality = state.videoQuality;
+        const seq = state.playbackSeq;
+        const opSeq = ++state.streamOpSeq;
         state.videoQuality = opt.height;
         try {
           const updated = await window.backendSetVideoQuality(opt.height);
+          if (seq !== state.playbackSeq || opSeq !== state.streamOpSeq) return;
           if (updated) {
             applyStreamSelection(updated, !media.paused && !media.ended, media.currentTime || 0, true);
           }
           showToast(`Quality preference: ${opt.height}p`);
         } catch (_) {
+          if (seq !== state.playbackSeq || opSeq !== state.streamOpSeq) return;
+          state.videoQuality = prevQuality;
+          renderVideoQualityUI();
           showToast('Failed to change quality');
         }
       });
@@ -466,16 +476,23 @@
       forceSeek = true;
     }
 
-    if (videoScreen.readyState >= 1 && !videoScreen.seeking) {
+    if (videoScreen.readyState < 1) {
+      // Wait for loadedmetadata before seeking/playing so frame 0 does not flash on quality swap.
+      if (!videoScreen.paused) videoScreen.pause();
+      return;
+    }
+
+    if (!videoScreen.seeking && (forceSeek || videoScreen.readyState >= 3)) {
       const target = media.currentTime || 0;
-      if (forceSeek || Math.abs((videoScreen.currentTime || 0) - target) > 0.22) {
+      if (forceSeek || Math.abs((videoScreen.currentTime || 0) - target) > 0.25) {
         try {
           videoScreen.currentTime = target;
         } catch (_) {}
       }
     }
 
-    if (!media.paused && !media.ended) {
+    const masterWaiting = media.readyState < 3 && !media.paused && !media.ended;
+    if (!media.paused && !media.ended && !masterWaiting) {
       if (videoScreen.paused) {
         videoScreen.play().catch(() => {});
       }
@@ -493,6 +510,23 @@
     renderVideoQualityUI();
 
     if (videoOnlyHotSwap) {
+      const nextAudioUrl = (info && info.audio_url) || '';
+      const currentAudioAttr = media.getAttribute('src') || '';
+      const switchedStreamVariant = nextAudioUrl && (
+        currentAudioAttr !== nextAudioUrl &&
+        media.src !== nextAudioUrl
+      );
+      if (switchedStreamVariant && (!info.video_url || info.progressive_only)) {
+        state.pendingSeekSec = media.currentTime || startPosSec || 0;
+        media.src = nextAudioUrl;
+        media.playbackRate = state.playbackRate;
+        media.load();
+        syncVideoScreenState(true);
+        if (autoplay) {
+          media.play().catch(() => {});
+        }
+        return;
+      }
       syncVideoScreenState(true);
       return;
     }
@@ -789,7 +823,6 @@
   }
 
   function ensureAudioAnalyser() {
-    if (vu.graphAttached) return;
     const AudioCtx = window.AudioContext || window.webkitAudioContext;
     if (!AudioCtx) return;
 
@@ -802,7 +835,9 @@
     }
 
     if (vu.audioCtx.state === 'running') {
-      attachStereoAnalyserNodes();
+      if (!vu.graphAttached) {
+        attachStereoAnalyserNodes();
+      }
       return;
     }
 
@@ -810,7 +845,9 @@
       vu.attachInFlight = true;
       vu.audioCtx.resume().then(() => {
         vu.attachInFlight = false;
-        attachStereoAnalyserNodes();
+        if (!vu.graphAttached) {
+          attachStereoAnalyserNodes();
+        }
       }).catch(() => {
         vu.attachInFlight = false;
       });
@@ -993,6 +1030,15 @@
 
   function unlockAudioContextOnGesture() {
     ensureAudioAnalyser();
+    // Inside a real user gesture, explicitly resume even if an earlier pre-gesture resume promise stayed pending.
+    if (vu.audioCtx && vu.audioCtx.state === 'suspended') {
+      vu.audioCtx.resume().then(() => {
+        vu.attachInFlight = false;
+        if (!vu.graphAttached) {
+          attachStereoAnalyserNodes();
+        }
+      }).catch(() => {});
+    }
   }
 
   function removeAudioUnlockListeners() {
@@ -1375,6 +1421,7 @@
       state.currentIndex++;
     }
     state.shuffleHistory = [];
+    state.shuffleBag = [];
     renderActiveDrawerView(false);
     await window.backendUpdatePlaylist(state.playlist, state.currentIndex).catch(() => {});
   }
@@ -1402,6 +1449,7 @@
         showToast('Could not build Radio Mix');
         return;
       }
+      state.queueGen++;
       state.playlist = res.playlist;
       state.shuffleHistory = [];
       state.shuffleBag = [];
@@ -1516,11 +1564,14 @@
         try {
           const res = await window.backendLoadSavedPlaylist(sp.name);
           if (!res || !Array.isArray(res.playlist) || res.playlist.length === 0) return;
+          state.queueGen++;
           state.playlist = res.playlist;
           state.shuffleHistory = [];
-      state.shuffleBag = [];
+          state.shuffleBag = [];
           state.currentIndex = 0;
           state.activeTab = 'queue';
+          state.filterQuery = '';
+          playlistFilter.value = '';
           searchInput.value = sp.query || '';
           renderActiveDrawerView(true);
           showToast(`Loaded "${sp.name}"`);
@@ -1678,7 +1729,9 @@
               ? await window.backendRemoveTrackFromPlaylist(sp.name, tr.id)
               : await window.backendAddTrackToPlaylist(sp.name, tr);
             state.savedPlaylists = Array.isArray(updated) ? updated : [];
-            renderAddToPlaylistList(tr);
+            if (state.popoverTrack && state.popoverTrack.id === tr.id && !addPlaylistPopover.classList.contains('hidden')) {
+              renderAddToPlaylistList(tr);
+            }
             renderActiveDrawerView(false);
             showToast(inPl ? `Removed from "${sp.name}"` : `Added to "${sp.name}"`);
           } catch (_) {
@@ -1728,6 +1781,7 @@
     const insertAt = Math.min(state.playlist.length, Math.max(0, state.currentIndex + 1));
     state.playlist.splice(insertAt, 0, tr);
     state.shuffleHistory = [];
+    state.shuffleBag = [];
     renderActiveDrawerView(false);
     showToast(`Queued next: ${tr.title}`);
     await window.backendUpdatePlaylist(state.playlist, state.currentIndex).catch(() => {});
@@ -1738,8 +1792,12 @@
     const removedActive = idx === state.currentIndex;
     state.playlist.splice(idx, 1);
     state.shuffleHistory = [];
+    state.shuffleBag = [];
 
     if (state.playlist.length === 0) {
+      state.playbackSeq++;
+      state.queueGen++;
+      state.pendingSeekSec = 0;
       state.currentIndex = -1;
       state.userInitiatedPlay = false;
       state.streamInfo = null;
@@ -1747,10 +1805,12 @@
       renderVideoQualityUI();
       syncVideoScreenState(false);
       clearErrorSkipTimer();
+      stopPlaytimeTracker();
       videoLoading.classList.add('hidden');
       media.pause();
       media.removeAttribute('src');
       media.load();
+      updateNowPlayingHeader();
       updatePlayButtonUI();
       renderActiveDrawerView(false);
       await window.backendUpdatePlaylist([], -1).catch(() => {});
@@ -1798,6 +1858,8 @@
     if (idx < 0) {
       const insertAt = state.currentIndex >= 0 ? state.currentIndex + 1 : 0;
       state.playlist.splice(insertAt, 0, tr);
+      state.shuffleHistory = [];
+      state.shuffleBag = [];
       idx = insertAt;
       await window.backendUpdatePlaylist(state.playlist, idx).catch(() => {});
     }
@@ -1808,10 +1870,27 @@
   async function playTrackAt(index, autoplay = true, startPosSec = 0) {
     if (index < 0 || index >= state.playlist.length) return;
     clearErrorSkipTimer();
+    stopPlaytimeTracker();
     const seq = ++state.playbackSeq;
     state.currentIndex = index;
     state.pendingSeekSec = startPosSec;
     state.userInitiatedPlay = autoplay;
+    state.streamInfo = null;
+    updateBitrateUI();
+    renderVideoQualityUI();
+
+    media.pause();
+    if (media.getAttribute('src')) {
+      media.removeAttribute('src');
+      media.load();
+    }
+    syncVideoScreenState(false);
+
+    progressFill.style.width = '0%';
+    progressBuffer.style.width = '0%';
+    progressRange.value = '0';
+    timeElapsed.textContent = formatTime(startPosSec > 0 ? startPosSec : 0);
+    updatePlayButtonUI();
     updateActiveRowHighlight();
     updateNowPlayingHeader();
 
@@ -1872,7 +1951,10 @@
     }
 
     // Reached end of queue: try loading more songs automatically first.
+    const seq = state.playbackSeq;
+    const qGen = state.queueGen;
     const addedCount = await triggerLoadMore();
+    if (seq !== state.playbackSeq || qGen !== state.queueGen) return;
     if (addedCount > 0 && state.currentIndex + 1 < state.playlist.length) {
       await playTrackAt(state.currentIndex + 1, true);
       return;
@@ -1908,9 +1990,11 @@
   async function triggerLoadMore() {
     if (state.isLoadingMore || state.playlist.length === 0) return 0;
     state.isLoadingMore = true;
+    const qGen = state.queueGen;
     loadMoreFooter.classList.remove('hidden');
     try {
       const res = await window.backendLoadMore();
+      if (qGen !== state.queueGen) return 0;
       if (res && Array.isArray(res.added) && res.added.length > 0) {
         const startIdx = state.playlist.length;
         state.playlist.push(...res.added);
@@ -1939,7 +2023,8 @@
       playing,
       state.volume,
       state.muted,
-      state.sessionPlayMs / 1000
+      state.sessionPlayMs / 1000,
+      state.statsEpoch
     ).catch(() => {});
   }
 
@@ -2054,6 +2139,10 @@
 
   async function runSearchQuery(q) {
     if (!q || state.isSearching) return;
+    if (state.searchSuggestTimer) {
+      clearTimeout(state.searchSuggestTimer);
+      state.searchSuggestTimer = null;
+    }
     closeSearchDropdown();
     state.isSearching = true;
     clearErrorSkipTimer();
@@ -2065,6 +2154,7 @@
         showToast('No playable songs found');
         return;
       }
+      state.queueGen++;
       state.playlist = res.playlist;
       if (Array.isArray(res.recent_searches)) {
         state.recentSearches = res.recent_searches;
@@ -2157,9 +2247,12 @@
 
   videoToggleBtn.addEventListener('click', async () => {
     const next = !state.videoEnabled;
+    const seq = state.playbackSeq;
+    const opSeq = ++state.streamOpSeq;
     applyVideoModeUI(next);
     try {
       const updated = await window.backendToggleVideo(next);
+      if (seq !== state.playbackSeq || opSeq !== state.streamOpSeq) return;
       if (updated && state.currentIndex >= 0) {
         applyStreamSelection(updated, !media.paused && !media.ended, media.currentTime || 0, true);
       }
@@ -2171,6 +2264,11 @@
       e.stopPropagation();
       const opening = videoQualityMenu.classList.contains('hidden');
       if (opening) {
+        closeSearchDropdown();
+        closeAddToPlaylistPopover();
+        if (authPopover) authPopover.classList.add('hidden');
+        if (audioPopover) audioPopover.classList.add('hidden');
+        if (shortcutsPopover) shortcutsPopover.classList.add('hidden');
         renderVideoQualityUI();
         videoQualityMenu.classList.remove('hidden');
         videoQualityWrap.classList.add('menu-open');
@@ -2413,11 +2511,14 @@
       try {
         const res = await window.backendLoadSavedPlaylist(sp.name);
         if (!res || !Array.isArray(res.playlist) || res.playlist.length === 0) return;
+        state.queueGen++;
         state.playlist = res.playlist;
         state.shuffleHistory = [];
-      state.shuffleBag = [];
+        state.shuffleBag = [];
         state.currentIndex = 0;
         state.activeTab = 'queue';
+        state.filterQuery = '';
+        playlistFilter.value = '';
         searchInput.value = sp.query || '';
         renderActiveDrawerView(true);
         showToast(`Playing "${sp.name}"`);
@@ -2432,11 +2533,14 @@
     try {
       const res = await window.backendLoadLikedPlaylist();
       if (!res || !Array.isArray(res.playlist) || res.playlist.length === 0) return;
+      state.queueGen++;
       state.playlist = res.playlist;
       state.shuffleHistory = [];
       state.shuffleBag = [];
       state.currentIndex = 0;
       state.activeTab = 'queue';
+      state.filterQuery = '';
+      playlistFilter.value = '';
       searchInput.value = '';
       renderActiveDrawerView(true);
       showToast('Playing Liked songs');
@@ -2450,6 +2554,9 @@
     clearQueueBtn.addEventListener('click', async () => {
       if (state.playlist.length === 0) return;
       closeAddToPlaylistPopover();
+      state.playbackSeq++;
+      state.queueGen++;
+      state.pendingSeekSec = 0;
       state.playlist = [];
       state.shuffleHistory = [];
       state.shuffleBag = [];
@@ -2465,6 +2572,7 @@
       media.pause();
       media.removeAttribute('src');
       media.load();
+      updateNowPlayingHeader();
       updatePlayButtonUI();
       renderActiveDrawerView(false);
       await window.backendUpdatePlaylist([], -1).catch(() => {});
@@ -2745,11 +2853,15 @@
 
   media.addEventListener('canplay', () => {
     videoLoading.classList.add('hidden');
+    syncVideoScreenState(false);
   });
 
   media.addEventListener('waiting', () => {
     stopPlaytimeTracker();
     videoLoading.classList.remove('hidden');
+    if (videoScreen && !videoScreen.paused) {
+      videoScreen.pause();
+    }
   });
 
   media.addEventListener('error', () => {
@@ -2824,7 +2936,36 @@
       syncVideoScreenState(true);
     });
     videoScreen.addEventListener('canplay', () => {
+      if (media.readyState >= 3) {
+        videoLoading.classList.add('hidden');
+      }
       syncVideoScreenState(false);
+    });
+    videoScreen.addEventListener('playing', () => {
+      if (media.readyState >= 3) {
+        videoLoading.classList.add('hidden');
+      }
+    });
+    videoScreen.addEventListener('waiting', () => {
+      if (state.videoEnabled && !videoScreen.classList.contains('hidden')) {
+        videoLoading.classList.remove('hidden');
+      }
+    });
+    videoScreen.addEventListener('stalled', () => {
+      if (state.videoEnabled && !videoScreen.classList.contains('hidden') && videoScreen.readyState < 3) {
+        videoLoading.classList.remove('hidden');
+      }
+    });
+    videoScreen.addEventListener('error', () => {
+      if (!videoScreen.getAttribute('src')) return;
+      videoLoading.classList.add('hidden');
+      videoScreen.pause();
+      videoScreen.removeAttribute('src');
+      videoScreen.classList.add('hidden');
+      media.classList.remove('master-hidden');
+      if (state.videoEnabled) {
+        showToast('Video stream unavailable');
+      }
     });
   }
 
@@ -2862,6 +3003,7 @@
   document.addEventListener('keydown', async (e) => {
     if (e.key === 'Escape') {
       closeSearchDropdown();
+      closeVideoQualityMenu();
       if (addPlaylistPopover && !addPlaylistPopover.classList.contains('hidden')) {
         closeAddToPlaylistPopover();
       }
@@ -2962,7 +3104,7 @@
   });
 
   // Hooks invoked by Go backend (e.g. tray menu actions, sleep timer & auth completion)
-  window.__trayCommand = (cmd) => {
+  window.__trayCommand = (cmd, arg) => {
     switch (cmd) {
       case 'play_pause':
         togglePlayPause();
@@ -2974,10 +3116,13 @@
         playPrev();
         break;
       case 'toggle_video': {
-        const nextV = !state.videoEnabled;
+        const nextV = typeof arg === 'boolean' ? arg : !state.videoEnabled;
+        const seq = state.playbackSeq;
+        const opSeq = ++state.streamOpSeq;
         applyVideoModeUI(nextV);
         if (typeof window.backendGetCurrentStreamInfo === 'function' && state.currentIndex >= 0) {
           window.backendGetCurrentStreamInfo().then((updated) => {
+            if (seq !== state.playbackSeq || opSeq !== state.streamOpSeq) return;
             if (updated) {
               applyStreamSelection(updated, !media.paused && !media.ended, media.currentTime || 0, true);
             }
@@ -2986,18 +3131,20 @@
         break;
       }
       case 'toggle_always_on_top':
-        applyAlwaysOnTopUI(!state.alwaysOnTop);
+        applyAlwaysOnTopUI(typeof arg === 'boolean' ? arg : !state.alwaysOnTop);
         break;
       case 'toggle_theme':
-        applyThemeUI(state.theme === 'light' ? 'dark' : 'light');
+        applyThemeUI(typeof arg === 'string' ? arg : (state.theme === 'light' ? 'dark' : 'light'));
         break;
       case 'toggle_shuffle':
-        state.shuffle = !state.shuffle;
+        state.shuffle = typeof arg === 'boolean' ? arg : !state.shuffle;
         updateModesUI();
         showToast(state.shuffle ? 'Shuffle: On' : 'Shuffle: Off');
         break;
       case 'cycle_repeat':
-        state.repeatMode = state.repeatMode === 'off' ? 'all' : state.repeatMode === 'all' ? 'one' : 'off';
+        state.repeatMode = typeof arg === 'string'
+          ? arg
+          : (state.repeatMode === 'off' ? 'all' : state.repeatMode === 'all' ? 'one' : 'off');
         updateModesUI();
         showToast(state.repeatMode === 'one' ? 'Repeat: One' : state.repeatMode === 'all' ? 'Repeat: All' : 'Repeat: Off');
         break;
@@ -3027,20 +3174,35 @@
   };
 
   window.__onStreamInfoUpdated = (info) => {
-    if (!info || !state.playlist[state.currentIndex]) return;
+    const curTr = state.playlist[state.currentIndex];
+    if (!info || !curTr) return;
+    if (info.video_id && info.video_id !== curTr.id) return;
     const prevProgressive = Boolean(state.streamInfo?.progressive_only);
+    const nextAudioUrl = info.audio_url || '';
+    const currentAudioAttr = media.getAttribute('src') || '';
+    const switchedToProg = Boolean(
+      info.progressive_only &&
+      nextAudioUrl &&
+      currentAudioAttr !== nextAudioUrl &&
+      media.src !== nextAudioUrl
+    );
     state.streamInfo = info;
     if (info.requested_quality > 0) state.videoQuality = info.requested_quality;
     updateBitrateUI();
     renderVideoQualityUI();
-    if (prevProgressive !== Boolean(info.progressive_only)) {
+    if (switchedToProg) {
+      applyStreamSelection(info, !media.paused && !media.ended, media.currentTime || 0, true);
+    } else if (prevProgressive !== Boolean(info.progressive_only)) {
       syncVideoScreenState(true);
     } else if (state.videoEnabled && info.video_url && videoScreen && !videoScreen.getAttribute('src')) {
       syncVideoScreenState(true);
     }
   };
 
-  window.__onStatsReset = () => {
+  window.__onStatsReset = (epoch) => {
+    if (typeof epoch === 'number' && epoch > state.statsEpoch) {
+      state.statsEpoch = epoch;
+    }
     state.baseTotalPlaySec = 0;
     state.sessionPlayMs = 0;
     if (!media.paused && !media.ended) {
@@ -3074,6 +3236,7 @@
       if (!init) return;
 
       const s = init.state || {};
+      state.statsEpoch = typeof init.stats_epoch === 'number' ? init.stats_epoch : 0;
       state.playlist = Array.isArray(s.playlist) ? s.playlist : [];
       state.likedTracks = Array.isArray(s.liked_tracks) ? s.liked_tracks : [];
       state.savedPlaylists = Array.isArray(s.saved_playlists) ? s.saved_playlists : [];

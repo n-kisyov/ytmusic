@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -83,11 +84,14 @@ func main() {
 	}
 
 	if opts.resetStats {
+		if notifyRunningInstanceResetStats() {
+			writeCLIOutput("ytmusic — Listening Stats Cleared", "Session and all-time listening time statistics have been reset to 0:00.")
+			return
+		}
 		if err := config.ResetPlayTimeStats(); err != nil {
 			writeCLIOutput("ytmusic — Reset Stats Error", fmt.Sprintf("Failed to reset listening time stats: %v", err))
 			os.Exit(1)
 		}
-		notifyExistingInstanceResetStats()
 		writeCLIOutput("ytmusic — Listening Stats Cleared", "Session and all-time listening time statistics have been reset to 0:00.")
 		return
 	}
@@ -100,6 +104,13 @@ func main() {
 	}
 
 	if opts.smokeTest {
+		smokeDir, mkErr := os.MkdirTemp("", "ytmusic-smoke-*")
+		if mkErr != nil {
+			log.Fatalf("smoke test temp dir failed: %v", mkErr)
+		}
+		defer os.RemoveAll(smokeDir)
+		_ = os.Setenv("APPDATA", smokeDir)
+
 		application, err := app.New()
 		if err != nil {
 			log.Fatalf("smoke test init failed: %v", err)
@@ -140,11 +151,24 @@ func focusExistingInstance() {
 	postMessageToRunningInstance(0x800B /* wmRestoreApp */)
 }
 
-func notifyExistingInstanceResetStats() {
-	postMessageToRunningInstance(0x800C /* wmResetStats */)
+func notifyRunningInstanceResetStats() bool {
+	mutexName, _ := windows.UTF16PtrFromString("Local\\YTMusicSingleInstanceMutex")
+	h, err := windows.OpenMutex(windows.SYNCHRONIZE, false, mutexName)
+	if err != nil || h == 0 {
+		return false
+	}
+	_ = windows.CloseHandle(h)
+	// Wait briefly if the main instance just acquired the mutex and is creating its window.
+	for i := 0; i < 15; i++ {
+		if postMessageToRunningInstance(0x800C /* wmResetStats */) {
+			return true
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	return postMessageToRunningInstance(0x800C /* wmResetStats */)
 }
 
-func postMessageToRunningInstance(msg uint32) {
+func postMessageToRunningInstance(msg uint32) bool {
 	user32 := windows.NewLazySystemDLL("user32.dll")
 	procFindWindowW := user32.NewProc("FindWindowW")
 	procPostMessageW := user32.NewProc("PostMessageW")
@@ -154,7 +178,9 @@ func postMessageToRunningInstance(msg uint32) {
 	hwnd, _, _ := procFindWindowW.Call(uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(title)))
 	if hwnd != 0 {
 		procPostMessageW.Call(hwnd, uintptr(msg), 0, 0)
+		return true
 	}
+	return false
 }
 
 func writeCLIOutput(title, text string) {

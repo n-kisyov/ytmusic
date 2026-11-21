@@ -216,9 +216,8 @@ func (r *Resolver) ResolveStreamVariant(ctx context.Context, videoID, kind strin
 			return ResolvedStream{URL: sel.AudioURL, UserAgent: sel.AudioUserAgent}, nil
 		}
 	default:
-		if len(cat.Progressive) > 0 {
-			p := cat.Progressive[0]
-			return ResolvedStream{URL: p.URL, UserAgent: p.UserAgent}, nil
+		if bestProg, ok := pickBestProgressive(cat.Progressive); ok {
+			return ResolvedStream{URL: bestProg.URL, UserAgent: bestProg.UserAgent}, nil
 		}
 		sel := SelectStreams(cat, false, prefHeight)
 		if sel.AudioURL != "" {
@@ -360,10 +359,17 @@ func SelectStreams(cat TrackCatalog, videoEnabled bool, prefHeight int) StreamSe
 			chosenVid := bestByHeight[chosenHeight]
 			sel.ActiveQuality = chosenHeight
 			if chosenVid.Kind == "progressive" || !hasAudio {
-				if hasProg {
-					sel.AudioURL = prog.URL
-					sel.AudioUserAgent = prog.UserAgent
-					sel.AudioBitrateKbps = prog.BitrateKbps
+				p := chosenVid
+				if chosenVid.Kind != "progressive" || p.URL == "" {
+					p = prog
+				}
+				if p.URL != "" {
+					sel.AudioURL = p.URL
+					sel.AudioUserAgent = p.UserAgent
+					sel.AudioBitrateKbps = p.BitrateKbps
+					if p.Height > 0 {
+						sel.ActiveQuality = p.Height
+					}
 					sel.VideoURL = ""
 					sel.VideoBitrateKbps = 0
 					sel.ProgressiveOnly = true
@@ -437,8 +443,15 @@ func pickBestProgressive(list []FormatStream) (FormatStream, bool) {
 	if len(list) == 0 {
 		return FormatStream{}, false
 	}
-	best := list[0]
-	for _, f := range list[1:] {
+	var best FormatStream
+	for _, f := range list {
+		if f.URL == "" {
+			continue
+		}
+		if best.URL == "" {
+			best = f
+			continue
+		}
 		if f.Itag == 18 && best.Itag != 18 {
 			best = f
 			continue
@@ -567,7 +580,8 @@ func (r *Resolver) resolveCatalogWithYtDlp(ctx context.Context, bin, videoID str
 		}
 		lowerProto := strings.ToLower(f.Protocol)
 		lowerURL := strings.ToLower(f.URL)
-		if strings.Contains(lowerProto, "m3u8") || strings.Contains(lowerURL, ".m3u8") || strings.Contains(lowerURL, "manifest/hls") {
+		if strings.Contains(lowerProto, "m3u8") || strings.Contains(lowerURL, ".m3u8") || strings.Contains(lowerURL, "manifest/hls") ||
+			strings.Contains(lowerProto, "dash") || strings.Contains(lowerURL, ".mpd") || strings.Contains(lowerURL, "manifest/dash") {
 			continue
 		}
 		ua := f.HTTPHeaders["User-Agent"]
@@ -831,6 +845,11 @@ func (r *Resolver) resolveCatalogWithInnerTube(ctx context.Context, videoID stri
 			kbps := parseKbps(f.AverageBitrate, f.Bitrate)
 			switch {
 			case strings.HasPrefix(lowerMime, "audio/"):
+				isAAC := strings.Contains(lowerMime, "mp4a")
+				// Skip non-AAC MP4 surround codecs (ec-3/ac-3) that fail decoding in Chromium/WebView2.
+				if strings.HasPrefix(lowerMime, "audio/mp4") && !isAAC {
+					continue
+				}
 				if !strings.HasPrefix(lowerMime, "audio/mp4") && !strings.HasPrefix(lowerMime, "audio/webm") {
 					continue
 				}
@@ -841,7 +860,7 @@ func (r *Resolver) resolveCatalogWithInnerTube(ctx context.Context, videoID stri
 					Kind:        "audio",
 					MimeType:    f.MimeType,
 					BitrateKbps: kbps,
-					IsAAC:       strings.HasPrefix(lowerMime, "audio/mp4"),
+					IsAAC:       isAAC,
 				})
 			case strings.HasPrefix(lowerMime, "video/"):
 				h := f.Height

@@ -19,8 +19,9 @@ const (
 	wsExLayered = 0x00080000
 	lwaAlpha    = 0x00000002
 
-	swHide = 0
-	swShow = 5
+	swHide    = 0
+	swShow    = 5
+	swRestore = 9
 
 	swpNoSize       = 0x0001
 	swpNoMove       = 0x0002
@@ -92,7 +93,10 @@ func (c *Controller) MinimizeToTray() {
 		return
 	}
 
+	var pendingW, pendingH int32
 	if c.resizeAnim.active {
+		pendingW = c.resizeAnim.winW
+		pendingH = c.resizeAnim.targetH
 		c.resizeAnim.active = false
 		procKillTimer.Call(c.hwnd, timerResizeID)
 	}
@@ -106,6 +110,10 @@ func (c *Controller) MinimizeToTray() {
 			c.savedRect = cur
 		}
 		startX, startY = cur.Left, cur.Top
+	}
+	if pendingW > 80 && pendingH > 80 {
+		c.savedRect.Right = c.savedRect.Left + pendingW
+		c.savedRect.Bottom = c.savedRect.Top + pendingH
 	}
 
 	offX, offY := c.trayGlideOffset(c.savedRect)
@@ -133,6 +141,9 @@ func (c *Controller) RestoreFromTray() {
 	c.revealed = true
 	setWindowCloak(c.hwnd, false)
 	if !c.hidden && c.trayAnim.mode != trayAnimMinimize {
+		if isIconic, _, _ := procIsIconic.Call(c.hwnd); isIconic != 0 {
+			procShowWindow.Call(c.hwnd, swRestore)
+		}
 		procSetForegroundWindow.Call(c.hwnd)
 		return
 	}

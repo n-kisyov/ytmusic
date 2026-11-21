@@ -170,3 +170,35 @@ func TestTruncateTooltipUTF8AndSurrogates(t *testing.T) {
 		t.Fatalf("expected <= 120 UTF-16 code units for emoji, got %d", units)
 	}
 }
+
+func TestSetClientSizeCancelsHighResTimerAndGetPositionSkipsIconic(t *testing.T) {
+	className, _ := windows.UTF16PtrFromString("static")
+	title, _ := windows.UTF16PtrFromString("YTMusicBugfixWinTest")
+	var hInstance windows.Handle
+	_ = windows.GetModuleHandleEx(0, nil, &hInstance)
+	hwnd, _, _ := user32.NewProc("CreateWindowExW").Call(0, uintptr(unsafe.Pointer(className)), uintptr(unsafe.Pointer(title)),
+		0x00CF0000, 100, 100, 396, 521, 0, 0, uintptr(hInstance), 0)
+	if hwnd == 0 {
+		t.Skip("CreateWindowExW unavailable in current test desktop")
+	}
+	defer procDestroyWindow.Call(hwnd)
+
+	c := &Controller{
+		hwnd:      hwnd,
+		savedRect: rect{Left: 140, Top: 120, Right: 536, Bottom: 641},
+	}
+	c.beginHighResTimer()
+	c.resizeAnim = resizeAnimState{active: true, startH: 200, targetH: 521, winW: 396}
+	c.SetClientSize(380, 521, false)
+	if c.resizeAnim.active || c.timerPeriodOn {
+		t.Fatalf("expected non-animated SetClientSize to clear resizeAnim and timerPeriodOn, got active=%v timer=%v",
+			c.resizeAnim.active, c.timerPeriodOn)
+	}
+
+	// Minimize window externally (iconic) and verify GetWindowPosition retains savedRect instead of (-32000,-32000).
+	procShowWindow.Call(hwnd, 6 /* SW_MINIMIZE */)
+	x, y := c.GetWindowPosition()
+	if x < -10000 || y < -10000 {
+		t.Fatalf("expected GetWindowPosition to ignore iconic (-32000,-32000), got (%d,%d)", x, y)
+	}
+}

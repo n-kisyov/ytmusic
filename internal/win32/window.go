@@ -150,7 +150,10 @@ var (
 	procCallNextHookEx            = user32.NewProc("CallNextHookEx")
 	procGetClassNameW             = user32.NewProc("GetClassNameW")
 	procMonitorFromPoint          = user32.NewProc("MonitorFromPoint")
+	procMonitorFromRect           = user32.NewProc("MonitorFromRect")
 	procGetMonitorInfoW           = user32.NewProc("GetMonitorInfoW")
+	procIsIconic                  = user32.NewProc("IsIconic")
+	procDefWindowProcW            = user32.NewProc("DefWindowProcW")
 
 	shcore               = windows.NewLazySystemDLL("shcore.dll")
 	procGetDpiForMonitor = shcore.NewProc("GetDpiForMonitor")
@@ -288,6 +291,19 @@ func monitorDPIAndWorkArea(savedX, savedY int) (int, rect) {
 	return dpi, wa
 }
 
+func isRectOnAnyMonitor(r rect) bool {
+	if procMonitorFromRect.Find() == nil {
+		hMon, _, _ := procMonitorFromRect.Call(uintptr(unsafe.Pointer(&r)), 0 /* MONITOR_DEFAULTTONULL */)
+		return hMon != 0
+	}
+	if procMonitorFromPoint.Find() == nil {
+		ptPacked := uintptr(uint32(r.Left)) | (uintptr(uint32(r.Top)) << 32)
+		hMon, _, _ := procMonitorFromPoint.Call(ptPacked, 0 /* MONITOR_DEFAULTTONULL */)
+		return hMon != 0
+	}
+	return true
+}
+
 // ComputeInitialWindowRect computes the exact physical window bounds for the given logical
 // client size and saved top-left position (centering on primary work area if unset or offscreen).
 func ComputeInitialWindowRect(savedX, savedY, logicalW, logicalH int) (int32, int32, int32, int32) {
@@ -317,7 +333,13 @@ func ComputeInitialWindowRect(savedX, savedY, logicalW, logicalH int) (int32, in
 	maxY := minY + int(int32(vh)) - 60
 
 	x, y := savedX, savedY
-	if (x == -1 && y == -1) || x < minX || y < minY || x > maxX || y > maxY {
+	titleStrip := rect{
+		Left:   int32(x),
+		Top:    int32(y),
+		Right:  int32(x + min(winW, 120)),
+		Bottom: int32(y + 40),
+	}
+	if (x == -1 && y == -1) || x < minX || y < minY || x > maxX || y > maxY || !isRectOnAnyMonitor(titleStrip) {
 		x = int(wa.Left) + (int(wa.Right-wa.Left)-winW)/2
 		y = int(wa.Top) + (int(wa.Bottom-wa.Top)-winH)/2
 	}
@@ -518,7 +540,13 @@ func (c *Controller) SetWindowPosition(x, y int) {
 	maxX := minX + int(int32(vw)) - 100
 	maxY := minY + int(int32(vh)) - 60
 
-	if (x == -1 && y == -1) || x < minX || y < minY || x > maxX || y > maxY {
+	titleStrip := rect{
+		Left:   int32(x),
+		Top:    int32(y),
+		Right:  int32(x + min(w, 120)),
+		Bottom: int32(y + 40),
+	}
+	if (x == -1 && y == -1) || x < minX || y < minY || x > maxX || y > maxY || !isRectOnAnyMonitor(titleStrip) {
 		x = int(wa.Left) + (int(wa.Right-wa.Left)-w)/2
 		y = int(wa.Top) + (int(wa.Bottom-wa.Top)-h)/2
 	}
@@ -531,10 +559,12 @@ func (c *Controller) SetWindowPosition(x, y int) {
 // GetWindowPosition returns the last known top-left screen coordinates of the window.
 func (c *Controller) GetWindowPosition() (int, int) {
 	if !c.hidden && c.trayAnim.mode == trayAnimNone && !c.resizeAnim.active {
-		var rc rect
-		procGetWindowRect.Call(c.hwnd, uintptr(unsafe.Pointer(&rc)))
-		if (rc.Right - rc.Left) > 80 {
-			c.savedRect = rc
+		if isIconic, _, _ := procIsIconic.Call(c.hwnd); isIconic == 0 {
+			var rc rect
+			procGetWindowRect.Call(c.hwnd, uintptr(unsafe.Pointer(&rc)))
+			if (rc.Right-rc.Left) > 80 && (rc.Bottom-rc.Top) > 80 {
+				c.savedRect = rc
+			}
 		}
 	}
 	return int(c.savedRect.Left), int(c.savedRect.Top)
@@ -573,8 +603,13 @@ func (c *Controller) SetClientSize(logicalW, logicalH int, animate bool) {
 	curH := cur.Bottom - cur.Top
 
 	if !animate || curH == winH || (cur.Right-cur.Left) == 0 {
-		c.resizeAnim.active = false
-		procKillTimer.Call(c.hwnd, timerResizeID)
+		if c.resizeAnim.active {
+			c.resizeAnim.active = false
+			procKillTimer.Call(c.hwnd, timerResizeID)
+			if c.trayAnim.mode == trayAnimNone {
+				c.endHighResTimer()
+			}
+		}
 		procSetWindowPos.Call(c.hwnd, 0, 0, 0, uintptr(winW), uintptr(winH), swpNoMove|swpNoZOrder|swpNoActivate)
 		procGetWindowRect.Call(c.hwnd, uintptr(unsafe.Pointer(&c.savedRect)))
 		if c.callbacks.OnResizeNeeded != nil {
@@ -618,7 +653,7 @@ func (c *Controller) SetDarkMode(dark bool) {
 
 // RevealWindow restores full opacity after startup initialization and first UI frame paint complete.
 func (c *Controller) RevealWindow() {
-	if c.revealed {
+	if c.quitting || c.revealed {
 		return
 	}
 	c.revealed = true
@@ -675,7 +710,8 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	c := controllers[hwnd]
 	ctrlMu.RUnlock()
 	if c == nil {
-		return 0
+		ret, _, _ := procDefWindowProcW.Call(hwnd, msg, wParam, lParam)
+		return ret
 	}
 
 	switch msg {
@@ -736,10 +772,22 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 			w := suggested.Right - suggested.Left
 			h := suggested.Bottom - suggested.Top
 			if w > 80 && h > 80 {
-				procSetWindowPos.Call(hwnd, 0, uintptr(suggested.Left), uintptr(suggested.Top), uintptr(w), uintptr(h), swpNoZOrder|swpNoActivate)
-				c.savedRect = suggested
-				if c.callbacks.OnResizeNeeded != nil {
-					c.callbacks.OnResizeNeeded()
+				if c.resizeAnim.active {
+					c.resizeAnim.active = false
+					procKillTimer.Call(hwnd, timerResizeID)
+					if c.trayAnim.mode == trayAnimNone {
+						c.endHighResTimer()
+					}
+				}
+				if c.trayAnim.mode == trayAnimNone {
+					procSetWindowPos.Call(hwnd, 0, uintptr(suggested.Left), uintptr(suggested.Top), uintptr(w), uintptr(h), swpNoZOrder|swpNoActivate)
+					c.savedRect = suggested
+					if c.callbacks.OnResizeNeeded != nil {
+						c.callbacks.OnResizeNeeded()
+					}
+				} else {
+					c.savedRect.Right = c.savedRect.Left + w
+					c.savedRect.Bottom = c.savedRect.Top + h
 				}
 			}
 			return 0
@@ -873,6 +921,10 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		c.endHighResTimer()
 		c.unregisterMediaHotKeys()
 		c.removeTray()
+		orig := c.origWndProc
+		if orig != 0 {
+			setWindowLongPtr(hwnd, gwlpWndProc, orig)
+		}
 		ctrlMu.Lock()
 		delete(controllers, hwnd)
 		ctrlMu.Unlock()

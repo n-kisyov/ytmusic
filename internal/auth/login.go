@@ -105,13 +105,14 @@ func RunLoginWindow() error {
 	chromium.DataPath = dataDir
 
 	var (
-		hwnd            uintptr
-		doneOnce        sync.Once
-		stateMu         sync.Mutex
-		webviewPtr      *edge.ICoreWebView2
-		checkingAuth    bool
-		visitedSwitcher bool
-		pendingAuth     *config.AuthState
+		hwnd             uintptr
+		doneOnce         sync.Once
+		stateMu          sync.Mutex
+		webviewPtr       *edge.ICoreWebView2
+		checkingAuth     bool
+		visitedSwitcher  bool
+		switchingChannel bool
+		pendingAuth      *config.AuthState
 	)
 
 	setWindowTitle := func(text string) {
@@ -158,7 +159,7 @@ func RunLoginWindow() error {
 
 		stateMu.Lock()
 		wv := webviewPtr
-		if wv == nil || checkingAuth || pendingAuth != nil {
+		if wv == nil || checkingAuth || switchingChannel || pendingAuth != nil {
 			stateMu.Unlock()
 			return
 		}
@@ -201,6 +202,7 @@ func RunLoginWindow() error {
 				shouldOpenSwitcher := !visitedSwitcher && len(authState.Accounts) > 1
 				if shouldOpenSwitcher {
 					visitedSwitcher = true
+					switchingChannel = true
 					checkingAuth = false
 					stateMu.Unlock()
 					if hwnd != 0 {
@@ -240,11 +242,18 @@ func RunLoginWindow() error {
 		if strings.HasPrefix(u.Path, "/channel_switcher") {
 			stateMu.Lock()
 			visitedSwitcher = true
+			switchingChannel = false
 			stateMu.Unlock()
 			setWindowTitle("Select YouTube Brand Account — ytmusic")
 			return
 		}
 		if isIntermediateAuthPath(u.Path) {
+			return
+		}
+		stateMu.Lock()
+		stillSwitching := switchingChannel
+		stateMu.Unlock()
+		if stillSwitching {
 			return
 		}
 
@@ -327,6 +336,10 @@ func RunLoginWindow() error {
 		var h = (location.hostname || '').toLowerCase();
 		if (h !== 'www.youtube.com' && h !== 'm.youtube.com' && h !== 'music.youtube.com' && h !== 'youtube.com') return;
 		var timer = setInterval(function() {
+			if (window.__ytAuthSent) {
+				clearInterval(timer);
+				return;
+			}
 			var p = location.pathname || '/';
 			if (p.indexOf('/signin') === 0 || p.indexOf('/channel_switcher') === 0 || p.indexOf('/logout') === 0 || p.indexOf('/oops') === 0) {
 				return;
@@ -354,8 +367,10 @@ func RunLoginWindow() error {
 
 const ytAuthExtractBody = `
 	try {
+		if (window.__ytAuthSent) return;
 		var cfg = (window.ytcfg && window.ytcfg.data_) || {};
 		if (!cfg.LOGGED_IN) return;
+		window.__ytAuthSent = true;
 		var name = cfg.USER_DISPLAY_NAME || '';
 		if (!name) {
 			var el = document.querySelector('#account-name, yt-formatted-string#account-name');
@@ -363,7 +378,10 @@ const ytAuthExtractBody = `
 		}
 		var pageId = cfg.DELEGATED_SESSION_ID || '';
 		if (!pageId && typeof cfg.DATASYNC_ID === 'string' && cfg.DATASYNC_ID.indexOf('||') > 0) {
-			pageId = cfg.DATASYNC_ID.split('||')[0] || '';
+			var dsParts = cfg.DATASYNC_ID.split('||');
+			if (dsParts[0] && dsParts[0] !== dsParts[1]) {
+				pageId = dsParts[0];
+			}
 		}
 		var authUser = (cfg.SESSION_INDEX !== undefined && cfg.SESSION_INDEX !== null) ? String(cfg.SESSION_INDEX) : '0';
 		window.chrome.webview.postMessage(JSON.stringify({

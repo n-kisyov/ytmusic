@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -31,13 +32,16 @@ const (
 )
 
 type readyPayload struct {
-	State     config.AppState        `json:"state"`
-	Auth      config.AuthState       `json:"auth"`
-	StreamURL string                 `json:"stream_url"`
-	Stream    *streamSelectionPayload `json:"stream,omitempty"`
+	State      config.AppState         `json:"state"`
+	Auth       config.AuthState        `json:"auth"`
+	StreamURL  string                  `json:"stream_url"`
+	Stream     *streamSelectionPayload `json:"stream,omitempty"`
+	StatsEpoch uint64                  `json:"stats_epoch"`
 }
 
 type streamSelectionPayload struct {
+	VideoID            string                 `json:"video_id,omitempty"`
+	StreamEpoch        uint64                 `json:"stream_epoch,omitempty"`
 	AudioURL           string                 `json:"audio_url"`
 	VideoURL           string                 `json:"video_url,omitempty"`
 	AudioKbps          int                    `json:"audio_kbps"`
@@ -71,6 +75,10 @@ type App struct {
 	winCtrl          *win32.Controller
 	authRunning      bool
 	exited           bool
+	statsEpoch       uint64
+	streamEpoch      uint64
+	authEpoch        uint64
+	queueEpoch       uint64
 	sleepMinutes     int
 	sleepDeadline    time.Time
 	sleepTimer       *time.Timer
@@ -183,14 +191,19 @@ func (a *App) Run(debug bool) error {
 		OnToggleVideo: func() {
 			a.mu.Lock()
 			a.state.VideoEnabled = !a.state.VideoEnabled
+			enabled := a.state.VideoEnabled
+			a.streamEpoch++
 			targetH := computeTargetHeight(a.state.VideoEnabled, a.state.PlaylistExpanded)
 			snapshot := a.cloneStateLocked()
 			a.mu.Unlock()
 
 			_ = config.SaveAppState(snapshot)
 			w.Dispatch(func() {
+				if a.isExited() {
+					return
+				}
 				a.winCtrl.SetClientSize(fixedWidth, targetH, true)
-				w.Eval("window.__trayCommand && window.__trayCommand('toggle_video')")
+				w.Eval(fmt.Sprintf("window.__trayCommand && window.__trayCommand('toggle_video', %t)", enabled))
 			})
 		},
 		IsVideoEnabled: func() bool {
@@ -207,8 +220,11 @@ func (a *App) Run(debug bool) error {
 
 			_ = config.SaveAppState(snapshot)
 			w.Dispatch(func() {
+				if a.isExited() {
+					return
+				}
 				a.winCtrl.SetAlwaysOnTop(enabled)
-				w.Eval("window.__trayCommand && window.__trayCommand('toggle_always_on_top')")
+				w.Eval(fmt.Sprintf("window.__trayCommand && window.__trayCommand('toggle_always_on_top', %t)", enabled))
 			})
 		},
 		IsAlwaysOnTop: func() bool {
@@ -229,8 +245,11 @@ func (a *App) Run(debug bool) error {
 
 			_ = config.SaveAppState(snapshot)
 			w.Dispatch(func() {
+				if a.isExited() {
+					return
+				}
 				a.winCtrl.SetDarkMode(theme != "light")
-				w.Eval("window.__trayCommand && window.__trayCommand('toggle_theme')")
+				w.Eval(fmt.Sprintf("window.__trayCommand && window.__trayCommand('toggle_theme', %q)", theme))
 			})
 		},
 		IsLightTheme: func() bool {
@@ -241,12 +260,16 @@ func (a *App) Run(debug bool) error {
 		OnToggleShuffle: func() {
 			a.mu.Lock()
 			a.state.Shuffle = !a.state.Shuffle
+			enabled := a.state.Shuffle
 			snapshot := a.cloneStateLocked()
 			a.mu.Unlock()
 
 			_ = config.SaveAppState(snapshot)
 			w.Dispatch(func() {
-				w.Eval("window.__trayCommand && window.__trayCommand('toggle_shuffle')")
+				if a.isExited() {
+					return
+				}
+				w.Eval(fmt.Sprintf("window.__trayCommand && window.__trayCommand('toggle_shuffle', %t)", enabled))
 			})
 		},
 		IsShuffleEnabled: func() bool {
@@ -264,12 +287,16 @@ func (a *App) Run(debug bool) error {
 			default:
 				a.state.RepeatMode = "off"
 			}
+			mode := a.state.RepeatMode
 			snapshot := a.cloneStateLocked()
 			a.mu.Unlock()
 
 			_ = config.SaveAppState(snapshot)
 			w.Dispatch(func() {
-				w.Eval("window.__trayCommand && window.__trayCommand('cycle_repeat')")
+				if a.isExited() {
+					return
+				}
+				w.Eval(fmt.Sprintf("window.__trayCommand && window.__trayCommand('cycle_repeat', %q)", mode))
 			})
 		},
 		GetRepeatMode: func() string {
@@ -307,6 +334,9 @@ func (a *App) Run(debug bool) error {
 	// Fallback reveal in case WebView2 navigation or DOM ready is delayed.
 	revealFallback := time.AfterFunc(3000*time.Millisecond, func() {
 		w.Dispatch(func() {
+			if a.isExited() {
+				return
+			}
 			if a.winCtrl != nil {
 				a.winCtrl.RevealWindow()
 			}
@@ -371,7 +401,10 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			if a.state.VideoEnabled {
 				videoURL = a.server.StreamVariantURL(cur.ID, "video", prefQ)
 			}
+			streamEpoch := a.streamEpoch
 			streamInfo = &streamSelectionPayload{
+				VideoID:          cur.ID,
+				StreamEpoch:      streamEpoch,
 				AudioURL:         audioURL,
 				VideoURL:         videoURL,
 				RequestedQuality: prefQ,
@@ -380,7 +413,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			if a.state.CurrentIndex+1 < len(a.state.Playlist) {
 				a.resolver.Prefetch(a.state.Playlist[a.state.CurrentIndex+1].ID)
 			}
-			go a.broadcastCurrentStreamInfo(w, cur.ID)
+			go a.broadcastCurrentStreamInfo(w, cur.ID, streamEpoch)
 		}
 
 		needsProfileSync := a.authState.LoggedIn &&
@@ -392,10 +425,11 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		}
 
 		return readyPayload{
-			State:     a.cloneStateLocked(),
-			Auth:      a.publicAuthState(a.authState),
-			StreamURL: streamURL,
-			Stream:    streamInfo,
+			State:      a.cloneStateLocked(),
+			Auth:       a.publicAuthState(a.authState),
+			StreamURL:  streamURL,
+			Stream:     streamInfo,
+			StatsEpoch: a.statsEpoch,
 		}, nil
 	}); err != nil {
 		return err
@@ -420,6 +454,8 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		}
 
 		a.mu.Lock()
+		a.queueEpoch++
+		a.streamEpoch++
 		a.state.SearchQuery = query
 		if _, _, isURL := youtube.ParseYouTubeInput(query); !isURL {
 			a.state.AddRecentSearch(query)
@@ -464,6 +500,8 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		}
 
 		a.mu.Lock()
+		a.queueEpoch++
+		a.streamEpoch++
 		if seedTrack.Title != "" {
 			a.state.SearchQuery = "Mix: " + seedTrack.Title
 		}
@@ -524,6 +562,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 
 	if err := w.Bind("backendLoadMore", func() (loadMorePayload, error) {
 		a.mu.Lock()
+		qEpoch := a.queueEpoch
 		token := a.state.ContinuationToken
 		existing := make(map[string]struct{}, len(a.state.Playlist))
 		var seedID string
@@ -546,7 +585,10 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		}
 
 		a.mu.Lock()
-		// Re-check against current playlist in case a new search happened concurrently.
+		if a.queueEpoch != qEpoch {
+			a.mu.Unlock()
+			return loadMorePayload{Added: []config.Track{}}, nil
+		}
 		curIDs := make(map[string]struct{}, len(a.state.Playlist))
 		for _, t := range a.state.Playlist {
 			curIDs[t.ID] = struct{}{}
@@ -580,6 +622,8 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		a.state.CurrentIndex = index
 		a.state.CurrentTrackID = tr.ID
 		a.state.PositionSec = 0
+		a.streamEpoch++
+		epoch := a.streamEpoch
 		videoEnabled := a.state.VideoEnabled
 		prefQ := a.state.VideoQuality
 		a.updateTrayTitleLocked()
@@ -590,7 +634,9 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		a.mu.Unlock()
 
 		_ = config.SaveAppState(snapshot)
-		return a.buildStreamSelection(tr.ID, videoEnabled, prefQ), nil
+		out := a.buildStreamSelection(tr.ID, videoEnabled, prefQ)
+		out.StreamEpoch = epoch
+		return out, nil
 	}); err != nil {
 		return err
 	}
@@ -604,8 +650,11 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		tr := a.state.Playlist[a.state.CurrentIndex]
 		videoEnabled := a.state.VideoEnabled
 		prefQ := a.state.VideoQuality
+		epoch := a.streamEpoch
 		a.mu.Unlock()
-		return a.buildStreamSelection(tr.ID, videoEnabled, prefQ), nil
+		out := a.buildStreamSelection(tr.ID, videoEnabled, prefQ)
+		out.StreamEpoch = epoch
+		return out, nil
 	}); err != nil {
 		return err
 	}
@@ -618,6 +667,8 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		}
 		a.mu.Lock()
 		a.state.VideoQuality = quality
+		a.streamEpoch++
+		epoch := a.streamEpoch
 		var trackID string
 		if a.state.CurrentIndex >= 0 && a.state.CurrentIndex < len(a.state.Playlist) {
 			trackID = a.state.Playlist[a.state.CurrentIndex].ID
@@ -628,9 +679,11 @@ func (a *App) bindMethods(w webview2.WebView) error {
 
 		_ = config.SaveAppState(snapshot)
 		if trackID == "" {
-			return streamSelectionPayload{RequestedQuality: quality, ActiveQuality: quality}, nil
+			return streamSelectionPayload{RequestedQuality: quality, ActiveQuality: quality, StreamEpoch: epoch}, nil
 		}
-		return a.buildStreamSelection(trackID, videoEnabled, quality), nil
+		out := a.buildStreamSelection(trackID, videoEnabled, quality)
+		out.StreamEpoch = epoch
+		return out, nil
 	}); err != nil {
 		return err
 	}
@@ -638,6 +691,8 @@ func (a *App) bindMethods(w webview2.WebView) error {
 	if err := w.Bind("backendToggleVideo", func(enabled bool) (streamSelectionPayload, error) {
 		a.mu.Lock()
 		a.state.VideoEnabled = enabled
+		a.streamEpoch++
+		epoch := a.streamEpoch
 		targetH := computeTargetHeight(a.state.VideoEnabled, a.state.PlaylistExpanded)
 		var trackID string
 		if a.state.CurrentIndex >= 0 && a.state.CurrentIndex < len(a.state.Playlist) {
@@ -650,13 +705,18 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		_ = config.SaveAppState(snapshot)
 		if a.winCtrl != nil {
 			w.Dispatch(func() {
+				if a.isExited() {
+					return
+				}
 				a.winCtrl.SetClientSize(fixedWidth, targetH, true)
 			})
 		}
 		if trackID == "" {
-			return streamSelectionPayload{RequestedQuality: prefQ}, nil
+			return streamSelectionPayload{RequestedQuality: prefQ, StreamEpoch: epoch}, nil
 		}
-		return a.buildStreamSelection(trackID, enabled, prefQ), nil
+		out := a.buildStreamSelection(trackID, enabled, prefQ)
+		out.StreamEpoch = epoch
+		return out, nil
 	}); err != nil {
 		return err
 	}
@@ -747,6 +807,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 
 	if err := w.Bind("backendUpdatePlaylist", func(playlist []config.Track, currentIndex int) error {
 		a.mu.Lock()
+		a.queueEpoch++
 		a.state.Playlist = append([]config.Track(nil), playlist...)
 		if len(a.state.Playlist) == 0 {
 			a.ytClient.ClearOverflow()
@@ -754,6 +815,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			a.state.ContinuationToken = ""
 			a.state.PositionSec = 0
 			a.state.WasPlaying = false
+			a.streamEpoch++
 		}
 		if currentIndex >= 0 && currentIndex < len(a.state.Playlist) {
 			a.state.CurrentIndex = currentIndex
@@ -849,6 +911,8 @@ func (a *App) bindMethods(w webview2.WebView) error {
 
 	if err := w.Bind("backendLoadLikedPlaylist", func() (searchPayload, error) {
 		a.mu.Lock()
+		a.queueEpoch++
+		a.streamEpoch++
 		a.ytClient.ClearOverflow()
 		a.state.Overflow = nil
 		a.state.ContinuationToken = ""
@@ -888,6 +952,8 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			a.mu.Unlock()
 			return searchPayload{}, fmt.Errorf("saved playlist %q not found", name)
 		}
+		a.queueEpoch++
+		a.streamEpoch++
 		a.ytClient.ClearOverflow()
 		a.state.Overflow = nil
 		a.state.SearchQuery = found.Query
@@ -1049,7 +1115,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		return err
 	}
 
-	if err := w.Bind("backendUpdatePlaybackState", func(index int, positionSec float64, isPlaying bool, volume float64, muted bool, sessionPlaySec float64) error {
+	if err := w.Bind("backendUpdatePlaybackState", func(index int, positionSec float64, isPlaying bool, volume float64, muted bool, sessionPlaySec float64, epoch uint64) error {
 		a.mu.Lock()
 		stateChanged := a.state.CurrentIndex != index || a.state.WasPlaying != isPlaying || a.state.Volume != volume || a.state.Muted != muted
 		if index >= -1 && index < len(a.state.Playlist) {
@@ -1068,7 +1134,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			a.state.Volume = volume
 		}
 		a.state.Muted = muted
-		if sessionPlaySec > a.sessionPlaySec {
+		if epoch == a.statsEpoch && sessionPlaySec > a.sessionPlaySec {
 			a.sessionPlaySec = sessionPlaySec
 			a.state.TotalPlayTimeSec = a.baseTotalPlaySec + int64(a.sessionPlaySec)
 		}
@@ -1102,17 +1168,21 @@ func (a *App) bindMethods(w webview2.WebView) error {
 	if err := w.Bind("backendAuthAction", func(action string) (config.AuthState, error) {
 		switch action {
 		case "logout":
-			_ = config.ClearAuthState(true)
 			empty := config.AuthState{Cookies: map[string]string{}}
 			a.mu.Lock()
+			a.authEpoch++
+			running := a.authRunning
 			a.authState = empty
 			a.mu.Unlock()
+			_ = config.ClearAuthState(!running)
 			a.ytClient.SetAuth(empty)
 			a.resolver.SetAuth(empty)
 			return a.publicAuthState(empty), nil
 
 		case "refresh":
-			a.refreshAccountProfileSync()
+			if err := a.refreshAccountProfileSync(); err != nil {
+				return config.AuthState{}, err
+			}
 			a.mu.Lock()
 			cur := a.publicAuthState(a.authState)
 			a.mu.Unlock()
@@ -1126,6 +1196,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			return cur, nil
 		}
 		a.authRunning = true
+		loginEpoch := a.authEpoch
 		prevUpdatedAt := a.authState.UpdatedAt
 		cur := a.publicAuthState(a.authState)
 		a.mu.Unlock()
@@ -1144,6 +1215,12 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			newAuth, err := auth.LaunchLoginHelper()
 			if err == nil && newAuth.LoggedIn && newAuth.UpdatedAt != prevUpdatedAt {
 				a.mu.Lock()
+				if a.authEpoch != loginEpoch || a.exited {
+					a.mu.Unlock()
+					_ = config.ClearAuthState(false)
+					return
+				}
+				a.authEpoch++
 				a.authState = newAuth
 				a.mu.Unlock()
 				a.ytClient.SetAuth(newAuth)
@@ -1152,6 +1229,9 @@ func (a *App) bindMethods(w webview2.WebView) error {
 				pub := a.publicAuthState(newAuth)
 				raw, _ := json.Marshal(pub)
 				w.Dispatch(func() {
+					if a.isExited() {
+						return
+					}
 					w.Eval("window.__onAuthUpdated && window.__onAuthUpdated(" + string(raw) + ", false)")
 				})
 			}
@@ -1168,6 +1248,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			a.mu.Unlock()
 			return config.AuthState{}, fmt.Errorf("not signed in")
 		}
+		a.authEpoch++
 		a.authState.ActivePageID = pageID
 		if authUser != "" {
 			a.authState.AuthUser = authUser
@@ -1192,7 +1273,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 
 		a.ytClient.SetAuth(updatedAuth)
 		a.resolver.SetAuth(updatedAuth)
-		a.refreshAccountProfileSync()
+		_ = a.refreshAccountProfileSync()
 
 		a.mu.Lock()
 		finalAuth := a.authState
@@ -1250,6 +1331,9 @@ func (a *App) setSleepTimer(minutes int) {
 			a.mu.Unlock()
 			if w != nil {
 				w.Dispatch(func() {
+					if a.isExited() {
+						return
+					}
 					w.Eval("window.__onSleepTimerChanged && window.__onSleepTimerChanged(0)")
 					w.Eval("window.__trayCommand && window.__trayCommand('pause_sleep')")
 				})
@@ -1268,6 +1352,9 @@ func (a *App) setSleepTimer(minutes int) {
 		}
 		rawMsg, _ := json.Marshal(msg)
 		wv.Dispatch(func() {
+			if a.isExited() {
+				return
+			}
 			wv.Eval(fmt.Sprintf("window.__onSleepTimerChanged && window.__onSleepTimerChanged(%d)", remainingSec))
 			wv.Eval("window.__showToast && window.__showToast(" + string(rawMsg) + ")")
 		})
@@ -1315,6 +1402,9 @@ func (a *App) handleSystemSuspend(w webview2.WebView) {
 	_ = config.SaveAppState(snapshot)
 	if w != nil {
 		w.Dispatch(func() {
+			if a.isExited() {
+				return
+			}
 			w.Eval("window.__trayCommand && window.__trayCommand('system_suspend')")
 		})
 	}
@@ -1328,6 +1418,9 @@ func (a *App) handleSystemResume(w webview2.WebView) {
 	a.mu.Unlock()
 	if w != nil {
 		w.Dispatch(func() {
+			if a.isExited() {
+				return
+			}
 			w.Eval("window.__trayCommand && window.__trayCommand('system_resume')")
 		})
 	}
@@ -1336,6 +1429,8 @@ func (a *App) handleSystemResume(w webview2.WebView) {
 // ResetPlayTimeStats clears both session and all-time listening counters cleanly.
 func (a *App) ResetPlayTimeStats() {
 	a.mu.Lock()
+	a.statsEpoch++
+	epoch := a.statsEpoch
 	a.baseTotalPlaySec = 0
 	a.sessionPlaySec = 0
 	a.lastTrayPlaySec = -1
@@ -1353,9 +1448,18 @@ func (a *App) ResetPlayTimeStats() {
 	_ = config.SaveAppState(snapshot)
 	if w != nil {
 		w.Dispatch(func() {
-			w.Eval("window.__onStatsReset && window.__onStatsReset()")
+			if a.isExited() {
+				return
+			}
+			w.Eval(fmt.Sprintf("window.__onStatsReset && window.__onStatsReset(%d)", epoch))
 		})
 	}
+}
+
+func (a *App) isExited() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.exited
 }
 
 func (a *App) saveFinalState() {
@@ -1425,21 +1529,26 @@ func (a *App) cloneStateLocked() config.AppState {
 	return cp
 }
 
-func (a *App) refreshAccountProfileSync() bool {
+func (a *App) refreshAccountProfileSync() error {
 	a.mu.Lock()
 	cur := a.authState
+	epoch := a.authEpoch
 	a.mu.Unlock()
 	if !cur.LoggedIn || !cur.HasFullSessionCookies() {
-		return false
+		return errors.New("sign in with YouTube session cookies first")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	prof, err := a.ytClient.FetchAccountProfile(ctx)
 	if err != nil {
-		return false
+		return err
 	}
 
 	a.mu.Lock()
+	if !a.authState.LoggedIn || a.authEpoch != epoch {
+		a.mu.Unlock()
+		return errors.New("account state changed during refresh")
+	}
 	auth.ApplyProfileToAuthState(&a.authState, prof)
 	updated := a.authState
 	a.mu.Unlock()
@@ -1447,18 +1556,25 @@ func (a *App) refreshAccountProfileSync() bool {
 	a.ytClient.SetAuth(updated)
 	a.resolver.SetAuth(updated)
 	_ = config.SaveAuthState(updated)
-	return true
+	return nil
 }
 
 func (a *App) refreshAndBroadcastAuth(w webview2.WebView) {
-	if !a.refreshAccountProfileSync() || w == nil {
+	if err := a.refreshAccountProfileSync(); err != nil || w == nil {
 		return
 	}
 	a.mu.Lock()
+	if a.exited || !a.authState.LoggedIn {
+		a.mu.Unlock()
+		return
+	}
 	pub := a.publicAuthState(a.authState)
 	a.mu.Unlock()
 	raw, _ := json.Marshal(pub)
 	w.Dispatch(func() {
+		if a.isExited() {
+			return
+		}
 		w.Eval("window.__onAuthUpdated && window.__onAuthUpdated(" + string(raw) + ", true)")
 	})
 }
@@ -1508,6 +1624,7 @@ func (a *App) buildStreamSelection(videoID string, videoEnabled bool, prefQualit
 			vidURL = a.server.StreamVariantURL(videoID, "video", prefQuality)
 		}
 		return streamSelectionPayload{
+			VideoID:          videoID,
 			AudioURL:         a.server.StreamVariantURL(videoID, "audio", prefQuality),
 			VideoURL:         vidURL,
 			RequestedQuality: prefQuality,
@@ -1520,6 +1637,7 @@ func (a *App) buildStreamSelection(videoID string, videoEnabled bool, prefQualit
 
 func selectionToPayload(srv *player.Server, videoID string, videoEnabled bool, sel player.StreamSelection) streamSelectionPayload {
 	out := streamSelectionPayload{
+		VideoID:            videoID,
 		AudioKbps:          sel.AudioBitrateKbps,
 		VideoKbps:          sel.VideoBitrateKbps,
 		RequestedQuality:   sel.RequestedQuality,
@@ -1544,7 +1662,7 @@ func selectionToPayload(srv *player.Server, videoID string, videoEnabled bool, s
 	return out
 }
 
-func (a *App) broadcastCurrentStreamInfo(w webview2.WebView, videoID string) {
+func (a *App) broadcastCurrentStreamInfo(w webview2.WebView, videoID string, expectedEpoch uint64) {
 	if w == nil || videoID == "" {
 		return
 	}
@@ -1555,19 +1673,28 @@ func (a *App) broadcastCurrentStreamInfo(w webview2.WebView, videoID string) {
 
 	info := a.buildStreamSelection(videoID, videoEnabled, prefQ)
 
-	// Confirm the active track didn't change while resolving.
+	// Confirm the active track, video mode, and quality preference didn't change while resolving.
 	a.mu.Lock()
 	var currentID string
 	if a.state.CurrentIndex >= 0 && a.state.CurrentIndex < len(a.state.Playlist) {
 		currentID = a.state.Playlist[a.state.CurrentIndex].ID
 	}
+	curEpoch := a.streamEpoch
+	exited := a.exited
 	a.mu.Unlock()
-	if currentID != videoID {
+	if exited || currentID != videoID || curEpoch != expectedEpoch {
 		return
 	}
 
+	info.StreamEpoch = expectedEpoch
 	raw, _ := json.Marshal(info)
 	w.Dispatch(func() {
+		a.mu.Lock()
+		stillValid := !a.exited && a.streamEpoch == expectedEpoch
+		a.mu.Unlock()
+		if !stillValid {
+			return
+		}
 		w.Eval("window.__onStreamInfoUpdated && window.__onStreamInfoUpdated(" + string(raw) + ")")
 	})
 }

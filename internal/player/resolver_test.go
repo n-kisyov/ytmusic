@@ -277,3 +277,51 @@ func TestFilterPlayableCatalogFallsBackToProgressiveOnOpenRangeGate(t *testing.T
 		t.Fatalf("expected progressive itag 18 to remain, got %+v", filtered.Progressive)
 	}
 }
+
+func TestProxyCancelPreservesCacheAndPickBestProgressiveSkipsEmpty(t *testing.T) {
+	r := NewResolver(nil)
+	r.mu.Lock()
+	r.catalogs["vidCancel"] = cachedCatalog{
+		Catalog: TrackCatalog{
+			Progressive: []FormatStream{{Itag: 18, URL: "http://127.0.0.1:1/never-dialed", Kind: "progressive"}},
+		},
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	r.mu.Unlock()
+
+	srv, err := NewServer(r, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.StreamURL("vidCancel"), nil)
+	_, _ = http.DefaultClient.Do(req)
+
+	r.mu.Lock()
+	_, stillCached := r.catalogs["vidCancel"]
+	r.mu.Unlock()
+	if !stillCached {
+		t.Fatalf("expected canceled client request not to invalidate resolver catalog cache")
+	}
+
+	best, ok := pickBestProgressive([]FormatStream{
+		{Itag: 18, URL: "", Kind: "progressive", Height: 360},
+		{Itag: 22, URL: "http://p/22", Kind: "progressive", Height: 720, IsH264: true},
+	})
+	if !ok || best.Itag != 22 || best.URL != "http://p/22" {
+		t.Fatalf("expected pickBestProgressive to skip empty URL itag 18 and pick 22, got ok=%v %+v", ok, best)
+	}
+
+	sel := SelectStreams(TrackCatalog{
+		Progressive: []FormatStream{
+			{Itag: 18, URL: "http://p/18", Kind: "progressive", Height: 360, BitrateKbps: 300, IsH264: true},
+			{Itag: 22, URL: "http://p/22", Kind: "progressive", Height: 720, BitrateKbps: 900, IsH264: true},
+		},
+	}, true, 720)
+	if sel.ActiveQuality != 720 || sel.AudioURL != "http://p/22" {
+		t.Fatalf("expected 720p progressive to stream itag 22 with ActiveQuality=720, got %+v", sel)
+	}
+}

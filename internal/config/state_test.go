@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -323,5 +324,46 @@ func TestAppStateRenameMoveAndAudioPrefs(t *testing.T) {
 	}
 	if afterReset.TotalPlayTimeSec != 0 || afterReset.EQPreset != "bass" {
 		t.Fatalf("expected TotalPlayTimeSec=0 with other prefs preserved, got %+v", afterReset)
+	}
+}
+
+func TestNormalizeAppStateOrphanTrackAndNaN(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.json")
+
+	// Missing CurrentTrackID must clear CurrentIndex/PositionSec/WasPlaying instead of attaching to an unrelated track.
+	st := DefaultAppState()
+	st.Playlist = []Track{{ID: "a1", Title: "One"}, {ID: "b2", Title: "Two"}}
+	st.CurrentIndex = 0
+	st.CurrentTrackID = "deleted_track"
+	st.PositionSec = 95
+	st.WasPlaying = true
+	st.Volume = math.NaN()
+	st.PlaybackRate = math.Inf(1)
+
+	if err := SaveAppStateTo(path, st); err != nil {
+		t.Fatalf("SaveAppStateTo with NaN/Inf and deleted CurrentTrackID failed: %v", err)
+	}
+	loaded, err := LoadAppStateFrom(path)
+	if err != nil {
+		t.Fatalf("LoadAppStateFrom failed: %v", err)
+	}
+	if loaded.CurrentIndex != -1 || loaded.CurrentTrackID != "" || loaded.PositionSec != 0 || loaded.WasPlaying {
+		t.Fatalf("expected orphaned track metadata cleared, got %+v", loaded)
+	}
+	if loaded.Volume != 0.8 || loaded.PlaybackRate != 1.0 {
+		t.Fatalf("expected sanitized Volume=0.8 PlaybackRate=1.0, got vol=%v rate=%v", loaded.Volume, loaded.PlaybackRate)
+	}
+
+	// Corrupt JSON must leave a *.corrupt.*.bak backup before returning defaults.
+	if err := os.WriteFile(path, []byte("{corrupt-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadAppStateFrom(path); err == nil {
+		t.Fatalf("expected error loading corrupt JSON")
+	}
+	matches, _ := filepath.Glob(path + ".corrupt.*.bak")
+	if len(matches) != 1 {
+		t.Fatalf("expected 1 corrupt backup file, got %v", matches)
 	}
 }

@@ -240,6 +240,8 @@ html, body {
   z-index: 30;
   width: 262px;
   max-width: calc(100vw - 20px);
+  max-height: calc(100vh - 52px);
+  overflow-y: auto;
   padding: 12px;
   border-radius: 12px;
   background: var(--yt-popover-bg);
@@ -1009,11 +1011,11 @@ html, body {
 .volume-wrap {
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 2px;
 }
 
 #volume-range {
-  width: 38px;
+  width: 32px;
   height: 3px;
   -webkit-appearance: none;
   appearance: none;
@@ -1039,7 +1041,7 @@ html, body {
 
 .toggle-pill {
   height: 26px;
-  padding: 0 7px;
+  padding: 0 6px;
   border-radius: 16px;
   border: none;
   background: var(--yt-bg-chip);
@@ -1052,6 +1054,7 @@ html, body {
   font-weight: 500;
   cursor: pointer;
   white-space: nowrap;
+  flex-shrink: 0;
   transition: background 0.12s ease, color 0.12s ease;
 }
 
@@ -1059,6 +1062,13 @@ html, body {
   padding: 0 6px;
   font-size: 10.5px;
   font-weight: 600;
+  max-width: 64px;
+}
+
+#eq-btn-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .toggle-pill svg {
@@ -1621,6 +1631,9 @@ html, body {
   bottom: 10px;
   left: 50%;
   transform: translateX(-50%);
+  max-width: calc(100vw - 20px);
+  overflow: hidden;
+  text-overflow: ellipsis;
   background: var(--yt-toast-bg);
   border: 1px solid var(--yt-border);
   color: var(--yt-toast-text);
@@ -1640,7 +1653,7 @@ html, body {
   left: 10px;
   right: 10px;
   z-index: 36;
-  max-height: 220px;
+  max-height: min(220px, calc(100vh - 50px));
   overflow-y: auto;
   padding: 5px;
   border-radius: 10px;
