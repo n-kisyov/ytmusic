@@ -31,9 +31,21 @@ const (
 )
 
 type readyPayload struct {
-	State     config.AppState  `json:"state"`
-	Auth      config.AuthState `json:"auth"`
-	StreamURL string           `json:"stream_url"`
+	State     config.AppState        `json:"state"`
+	Auth      config.AuthState       `json:"auth"`
+	StreamURL string                 `json:"stream_url"`
+	Stream    *streamSelectionPayload `json:"stream,omitempty"`
+}
+
+type streamSelectionPayload struct {
+	AudioURL           string                 `json:"audio_url"`
+	VideoURL           string                 `json:"video_url,omitempty"`
+	AudioKbps          int                    `json:"audio_kbps"`
+	VideoKbps          int                    `json:"video_kbps"`
+	RequestedQuality   int                    `json:"requested_quality"`
+	ActiveQuality      int                    `json:"active_quality"`
+	ProgressiveOnly    bool                   `json:"progressive_only,omitempty"`
+	AvailableQualities []player.QualityOption `json:"available_qualities,omitempty"`
 }
 
 type searchPayload struct {
@@ -346,12 +358,29 @@ func (a *App) bindMethods(w webview2.WebView) error {
 		defer a.mu.Unlock()
 
 		var streamURL string
+		var streamInfo *streamSelectionPayload
 		if a.state.CurrentIndex >= 0 && a.state.CurrentIndex < len(a.state.Playlist) {
 			cur := a.state.Playlist[a.state.CurrentIndex]
-			streamURL = a.server.StreamURL(cur.ID)
+			prefQ := a.state.VideoQuality
+			if prefQ <= 0 {
+				prefQ = 720
+			}
+			audioURL := a.server.StreamVariantURL(cur.ID, "audio", prefQ)
+			streamURL = audioURL
+			var videoURL string
+			if a.state.VideoEnabled {
+				videoURL = a.server.StreamVariantURL(cur.ID, "video", prefQ)
+			}
+			streamInfo = &streamSelectionPayload{
+				AudioURL:         audioURL,
+				VideoURL:         videoURL,
+				RequestedQuality: prefQ,
+				ActiveQuality:    prefQ,
+			}
 			if a.state.CurrentIndex+1 < len(a.state.Playlist) {
 				a.resolver.Prefetch(a.state.Playlist[a.state.CurrentIndex+1].ID)
 			}
+			go a.broadcastCurrentStreamInfo(w, cur.ID)
 		}
 
 		needsProfileSync := a.authState.LoggedIn &&
@@ -366,6 +395,7 @@ func (a *App) bindMethods(w webview2.WebView) error {
 			State:     a.cloneStateLocked(),
 			Auth:      a.publicAuthState(a.authState),
 			StreamURL: streamURL,
+			Stream:    streamInfo,
 		}, nil
 	}); err != nil {
 		return err
