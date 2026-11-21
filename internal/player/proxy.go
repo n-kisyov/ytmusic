@@ -31,6 +31,7 @@ func NewServer(resolver *Resolver, uiFS fs.FS) (*Server, error) {
 		resolver: resolver,
 		proxyHTTP: &http.Client{
 			Transport: &http.Transport{
+				Proxy: http.ProxyFromEnvironment,
 				DialContext: (&net.Dialer{
 					Timeout:   15 * time.Second,
 					KeepAlive: 30 * time.Second,
@@ -154,7 +155,7 @@ func (s *Server) handleStream(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "video/mp4")
 	}
 	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Cache-Control", "private, max-age=300")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(resp.StatusCode)
 
 	if r.Method == http.MethodHead {

@@ -3,6 +3,8 @@
 package win32
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 	"unsafe"
@@ -22,12 +24,18 @@ const (
 	wmSysCommand      = 0x0112
 	wmTimer           = 0x0113
 	wmHotKey          = 0x0312
+	wmPowerBroadcast  = 0x0218
 	wmLButtonUp       = 0x0202
 	wmRButtonUp       = 0x0205
+	wmMButtonUp       = 0x0208
 	wmContextMenu     = 0x007B
 	wmDpiChanged      = 0x02E0
 	wmTrayIcon        = 0x800A // WM_APP + 10 (avoids go-webview2's WM_APP = 0x8000)
 	wmRestoreApp      = 0x800B // WM_APP + 11 (posted by second instance to restore existing window)
+	wmResetStats      = 0x800C // WM_APP + 12 (posted by --reset-stats CLI flag)
+
+	pbtApmSuspend    = 0x0004
+	pbtApmResumeAuto = 0x0012
 
 	scMinimize = 0xF020
 
@@ -86,6 +94,9 @@ type Callbacks struct {
 	GetSleepTimerMinutes func() int
 	OnExit               func()
 	OnResizeNeeded       func()
+	OnSystemSuspend      func()
+	OnSystemResume       func()
+	OnResetStats         func()
 }
 
 // Controller manages the native Win32 window styles, DWM attributes, tray icon, and animations.
@@ -128,6 +139,7 @@ var (
 	procFindWindowW               = user32.NewProc("FindWindowW")
 	procFindWindowExW             = user32.NewProc("FindWindowExW")
 	procSystemParametersInfoW     = user32.NewProc("SystemParametersInfoW")
+	procShellExecuteW             = shell32.NewProc("ShellExecuteW")
 	procGetSystemMetrics          = user32.NewProc("GetSystemMetrics")
 	procCopyRect                  = user32.NewProc("CopyRect")
 	procDestroyWindow             = user32.NewProc("DestroyWindow")
@@ -739,13 +751,37 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 		case wmLButtonUp:
 			c.ToggleTrayVisibility()
 			return 0
+		case wmMButtonUp:
+			if c.callbacks.OnPlayPause != nil {
+				c.callbacks.OnPlayPause()
+			}
+			return 0
 		case wmRButtonUp, wmContextMenu:
 			c.showTrayMenu()
 			return 0
 		}
 
+	case wmPowerBroadcast:
+		switch wParam {
+		case pbtApmSuspend:
+			if c.callbacks.OnSystemSuspend != nil {
+				c.callbacks.OnSystemSuspend()
+			}
+		case pbtApmResumeAuto:
+			if c.callbacks.OnSystemResume != nil {
+				c.callbacks.OnSystemResume()
+			}
+		}
+		return 1
+
 	case wmRestoreApp:
 		c.RestoreFromTray()
+		return 0
+
+	case wmResetStats:
+		if c.callbacks.OnResetStats != nil {
+			c.callbacks.OnResetStats()
+		}
 		return 0
 
 	case wmCommand:
