@@ -520,9 +520,9 @@ func newController(h uintptr, cb Callbacks) *Controller {
 }
 
 func (c *Controller) applyWindowChrome() {
-	// Ensure window is strictly non-resizable and titlebar-free with layered alpha preserved until RevealWindow.
+	// Ensure window is strictly non-resizable and frameless with layered alpha preserved until RevealWindow.
 	style := getWindowLongPtr(c.hwnd, gwlStyle)
-	style &^= (wsCaption | wsThickFrame | wsMaximizeBox)
+	style &^= (wsThickFrame | wsMaximizeBox)
 	setWindowLongPtr(c.hwnd, gwlStyle, style)
 	procSetWindowPos.Call(c.hwnd, 0, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoZOrder|swpNoActivate|swpFrameChanged)
 
