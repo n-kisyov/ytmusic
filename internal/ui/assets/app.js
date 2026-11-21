@@ -33,6 +33,8 @@
   const authSwitchGoogleBtn = document.getElementById('auth-switch-google-btn');
   const authSignoutBtn = document.getElementById('auth-signout-btn');
   const authCloseBtn = document.getElementById('auth-close-btn');
+  const topBar = document.getElementById('top-bar');
+  const minimizeBtn = document.getElementById('minimize-btn');
   const quitBtn = document.getElementById('quit-btn');
 
   const currentThumb = document.getElementById('current-thumb');
