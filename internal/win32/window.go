@@ -451,7 +451,7 @@ func startupCBTHookProc(nCode int32, wParam uintptr, lParam unsafe.Pointer) uint
 				cbt.Lpcs.Cy = initRect.Bottom - initRect.Top
 
 				style := getWindowLongPtr(wParam, gwlStyle)
-				setWindowLongPtr(wParam, gwlStyle, style&^(wsThickFrame|wsMaximizeBox))
+				setWindowLongPtr(wParam, gwlStyle, style&^(wsCaption|wsThickFrame|wsMaximizeBox))
 
 				// Subclass immediately so WM_SHOWWINDOW/WM_WINDOWPOSCHANGING applies WS_EX_LAYERED
 				// with alpha=0 after CreateWindowExW finishes and before ShowWindow draws a pixel.
@@ -474,6 +474,10 @@ func startupCBTHookProc(nCode int32, wParam uintptr, lParam unsafe.Pointer) uint
 					procDwmSetWindowAttribute.Call(wParam, dwmwaUseImmersiveDarkMode, uintptr(unsafe.Pointer(&val)), unsafe.Sizeof(val))
 					round := uint32(dwmwcpRound)
 					procDwmSetWindowAttribute.Call(wParam, dwmwaWindowCornerPreference, uintptr(unsafe.Pointer(&round)), unsafe.Sizeof(round))
+				}
+				if procDwmExtendFrameIntoClientArea.Find() == nil {
+					m := margins{0, 0, 1, 0}
+					procDwmExtendFrameIntoClientArea.Call(wParam, uintptr(unsafe.Pointer(&m)))
 				}
 				setWindowCloak(wParam, true)
 			}
