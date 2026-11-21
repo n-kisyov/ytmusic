@@ -73,6 +73,7 @@
   const shortcutsHelpBtn = document.getElementById('shortcuts-help-btn');
   const sleepCountdownLabel = document.getElementById('sleep-countdown-label');
   const curCopyLinkBtn = document.getElementById('cur-copy-link-btn');
+  const curOpenYtBtn = document.getElementById('cur-open-yt-btn');
   const curRadioBtn = document.getElementById('cur-radio-btn');
   const shortcutsPopover = document.getElementById('shortcuts-popover');
   const shortcutsCloseBtn = document.getElementById('shortcuts-close-btn');
@@ -98,9 +99,11 @@
   const saveQueueCancel = document.getElementById('save-queue-cancel');
   const filterRow = document.getElementById('filter-row');
   const playlistFilter = document.getElementById('playlist-filter');
+  const clearQueueBtn = document.getElementById('clear-queue-btn');
   const appendCollectionBtn = document.getElementById('append-collection-btn');
   const playLikedBtn = document.getElementById('play-liked-btn');
   const addPlaylistPopover = document.getElementById('add-playlist-popover');
+  const addPlaylistOpenBtn = document.getElementById('add-playlist-open-btn');
   const addPlaylistCopyBtn = document.getElementById('add-playlist-copy-btn');
   const addPlaylistClose = document.getElementById('add-playlist-close');
   const addPlaylistTrack = document.getElementById('add-playlist-track');
@@ -120,6 +123,7 @@
     shuffle: false,
     repeatMode: 'off', // 'off' | 'all' | 'one'
     shuffleHistory: [],
+    shuffleBag: [],
     activeTab: 'queue', // 'queue' | 'liked' | 'saved'
     filterQuery: '',
     volume: 0.8,
@@ -189,11 +193,22 @@
     playtimeStat.title = `Session: ${formatFullPlayTime(sessSec)} • All-time: ${formatFullPlayTime(totalSec)}`;
   }
 
+  function openTrackExternal(tr) {
+    if (!tr || !tr.id) return;
+    const url = `https://www.youtube.com/watch?v=${tr.id}`;
+    if (typeof window.backendOpenExternal === 'function') {
+      window.backendOpenExternal(url).catch(() => showToast('Could not open browser'));
+    }
+  }
+
   function flushSessionPlayTime() {
     if (state.playAnchorMs > 0) {
       const now = performance.now();
       if (!media.paused && !media.ended && media.readyState >= 2) {
-        state.sessionPlayMs += Math.max(0, Math.min(10000, now - state.playAnchorMs));
+        const delta = now - state.playAnchorMs;
+        if (delta > 0 && delta < 3600000) {
+          state.sessionPlayMs += delta;
+        }
       }
       state.playAnchorMs = now;
     }
@@ -866,6 +881,9 @@
       (state.activeTab === 'liked' && state.likedTracks.length > 0) ||
       Boolean(selectedSp && Array.isArray(selectedSp.tracks) && selectedSp.tracks.length > 0);
     playLikedBtn.classList.toggle('hidden', !canPlayCollection);
+    if (clearQueueBtn) {
+      clearQueueBtn.classList.toggle('hidden', state.activeTab !== 'queue' || state.playlist.length === 0);
+    }
     if (appendCollectionBtn) {
       appendCollectionBtn.classList.toggle('hidden', !canPlayCollection);
     }
