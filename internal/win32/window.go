@@ -215,6 +215,13 @@ func fillWindowBg(hwnd, hdc uintptr, dark bool) {
 	procFillRect.Call(hdc, uintptr(unsafe.Pointer(&rc)), bgBrush(dark))
 }
 
+type margins struct {
+	CxLeftWidth    int32
+	CxRightWidth   int32
+	CyTopHeight    int32
+	CyBottomHeight int32
+}
+
 type createStructW struct {
 	LpCreateParams uintptr
 	HInstance      uintptr
