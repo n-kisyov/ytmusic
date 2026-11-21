@@ -1742,6 +1742,10 @@
     if (state.playlist.length === 0) {
       state.currentIndex = -1;
       state.userInitiatedPlay = false;
+      state.streamInfo = null;
+      updateBitrateUI();
+      renderVideoQualityUI();
+      syncVideoScreenState(false);
       clearErrorSkipTimer();
       videoLoading.classList.add('hidden');
       media.pause();
@@ -2449,9 +2453,12 @@
       state.playlist = [];
       state.shuffleHistory = [];
       state.shuffleBag = [];
-      state.shuffleBag = [];
       state.currentIndex = -1;
       state.userInitiatedPlay = false;
+      state.streamInfo = null;
+      updateBitrateUI();
+      renderVideoQualityUI();
+      syncVideoScreenState(false);
       clearErrorSkipTimer();
       stopPlaytimeTracker();
       videoLoading.classList.add('hidden');
