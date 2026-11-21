@@ -2923,12 +2923,9 @@
         pushPlaybackState();
         break;
       case 'v':
-      case 'V': {
-        const nextV = !state.videoEnabled;
-        applyVideoModeUI(nextV);
-        await window.backendToggleVideo(nextV);
+      case 'V':
+        if (videoToggleBtn) videoToggleBtn.click();
         break;
-      }
       case 'l':
       case 'L': {
         const nextL = !state.playlistExpanded;
