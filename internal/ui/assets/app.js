@@ -3082,6 +3082,7 @@
       state.vuStyle = s.vu_style === 'bar' ? 'bar' : 'led';
       state.eqPreset = ['flat', 'bass', 'vocal', 'bright'].includes(s.eq_preset) ? s.eq_preset : 'flat';
       state.playbackRate = (typeof s.playback_rate === 'number' && s.playback_rate >= 0.5 && s.playback_rate <= 2.0) ? s.playback_rate : 1.0;
+      state.videoQuality = (typeof s.video_quality === 'number' && s.video_quality > 0) ? s.video_quality : 720;
       state.baseTotalPlaySec = (typeof s.total_play_time_sec === 'number' && s.total_play_time_sec > 0) ? Math.floor(s.total_play_time_sec) : 0;
       updatePlaytimeUI();
 
@@ -3099,20 +3100,11 @@
       applyAuthUI(init.auth || {});
       renderActiveDrawerView(true);
 
-      if (state.currentIndex >= 0 && state.currentIndex < state.playlist.length && init.stream_url) {
+      if (state.currentIndex >= 0 && state.currentIndex < state.playlist.length && (init.stream || init.stream_url)) {
         state.pendingSeekSec = s.position_sec || 0;
         state.userInitiatedPlay = Boolean(s.was_playing);
-        media.src = init.stream_url;
-        media.playbackRate = state.playbackRate;
-        media.load();
-        if (s.was_playing) {
-          media.play().catch(() => {
-            state.userInitiatedPlay = false;
-            updatePlayButtonUI();
-          });
-        } else {
-          updatePlayButtonUI();
-        }
+        const startupInfo = init.stream || { audio_url: init.stream_url, requested_quality: state.videoQuality, active_quality: state.videoQuality };
+        applyStreamSelection(startupInfo, Boolean(s.was_playing), state.pendingSeekSec, false);
         // Display saved position immediately before metadata finishes buffering.
         const tr = state.playlist[state.currentIndex];
         const dur = (tr && tr.duration_sec) || 0;
