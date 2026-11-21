@@ -463,6 +463,25 @@ func (s *AppState) AddRecentSearch(query string) {
 	s.RecentSearches = out
 }
 
+// ResetPlayTimeStats clears persisted all-time listening time in state.json.
+func ResetPlayTimeStats() error {
+	path, err := StateFilePath()
+	if err != nil {
+		return err
+	}
+	return ResetPlayTimeStatsFrom(path)
+}
+
+// ResetPlayTimeStatsFrom clears persisted all-time listening time in the given state file.
+func ResetPlayTimeStatsFrom(path string) error {
+	state, err := LoadAppStateFrom(path)
+	if err != nil {
+		return err
+	}
+	state.TotalPlayTimeSec = 0
+	return SaveAppStateTo(path, state)
+}
+
 // SaveAppState saves state.json atomically to %APPDATA%\ytmusic\state.json.
 func SaveAppState(state AppState) error {
 	path, err := StateFilePath()
