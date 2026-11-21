@@ -1,6 +1,10 @@
 (() => {
   const media = document.getElementById('media-player');
   const videoPane = document.getElementById('video-pane');
+  const videoScreen = document.getElementById('video-screen');
+  const videoQualityWrap = document.getElementById('video-quality-wrap');
+  const videoQualityBtn = document.getElementById('video-quality-btn');
+  const videoQualityMenu = document.getElementById('video-quality-menu');
   const videoLoading = document.getElementById('video-loading-overlay');
   const searchForm = document.getElementById('search-form');
   const searchInput = document.getElementById('search-input');
@@ -40,6 +44,7 @@
   const trackCounter = document.getElementById('track-counter');
   const vuMeter = document.getElementById('vu-meter');
   const vuCanvas = document.getElementById('vu-canvas');
+  const bitrateStat = document.getElementById('bitrate-stat');
   const playtimeStat = document.getElementById('playtime-stat');
 
   const timeElapsed = document.getElementById('time-elapsed');
