@@ -705,6 +705,16 @@ func (c *Controller) BeginQuit() {
 	procDestroyWindow.Call(c.hwnd)
 }
 
+// StartDrag begins native Windows window dragging (Aero Snap, multi-monitor dragging)
+// when initiated from the custom HTML title / top bar.
+func (c *Controller) StartDrag() {
+	if c.hwnd == 0 {
+		return
+	}
+	procReleaseCapture.Call()
+	procSendMessageW.Call(c.hwnd, wmNcLButtonDown, htCaption, 0)
+}
+
 func (c *Controller) registerMediaHotKeys() {
 	procRegisterHotKey.Call(c.hwnd, hkPlayPause, 0, vkMediaPlayPause)
 	procRegisterHotKey.Call(c.hwnd, hkNext, 0, vkMediaNextTrack)
@@ -737,6 +747,12 @@ func subclassWndProc(hwnd, msg, wParam, lParam uintptr) uintptr {
 	}
 
 	switch msg {
+	case wmNcCalcSize:
+		if wParam != 0 {
+			// Entire window rectangle is client area (no non-client title bar / borders).
+			return 0
+		}
+
 	case wmEraseBkgnd:
 		fillWindowBg(hwnd, wParam, c.isDark)
 		return 1
