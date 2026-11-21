@@ -1646,12 +1646,7 @@
         state.shuffleHistory.push(state.currentIndex);
         if (state.shuffleHistory.length > 100) state.shuffleHistory.shift();
       }
-      let nextIdx = 0;
-      if (state.playlist.length > 1) {
-        do {
-          nextIdx = Math.floor(Math.random() * state.playlist.length);
-        } while (nextIdx === state.currentIndex);
-      }
+      const nextIdx = pickNextShuffleIndex();
       await playTrackAt(nextIdx, true);
       return;
     }
