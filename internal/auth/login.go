@@ -549,7 +549,6 @@ func extractAllCookies(wv *edge.ICoreWebView2, targetURI string, done func(cooki
 			done(nil, nil)
 			return
 		}
-		defer syscall.SyscallN(comVtblSlot(list, 2), uintptr(list)) // Release CookieList
 		var count uint32
 		// ICoreWebView2CookieList: slot 3 = get_Count
 		syscall.SyscallN(comVtblSlot(list, 3), uintptr(list), uintptr(unsafe.Pointer(&count)))
