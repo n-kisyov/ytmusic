@@ -505,12 +505,12 @@ func newController(h uintptr, cb Callbacks) *Controller {
 	controllers[h] = c
 	ctrlMu.Unlock()
 
+	orig := setWindowLongPtr(h, gwlpWndProc, wndProcCB)
+	c.origWndProc = orig
+
 	c.applyWindowChrome()
 	c.initTray()
 	c.registerMediaHotKeys()
-
-	orig := setWindowLongPtr(h, gwlpWndProc, wndProcCB)
-	c.origWndProc = orig
 
 	var rc rect
 	procGetWindowRect.Call(h, uintptr(unsafe.Pointer(&rc)))
@@ -672,6 +672,7 @@ func (c *Controller) RevealWindow() {
 	exStyle := getWindowLongPtr(c.hwnd, gwlExStyle)
 	if (exStyle & wsExLayered) != 0 {
 		setWindowLongPtr(c.hwnd, gwlExStyle, exStyle&^wsExLayered)
+		procSetWindowPos.Call(c.hwnd, 0, 0, 0, 0, 0, swpNoMove|swpNoSize|swpNoZOrder|swpNoActivate|swpFrameChanged)
 	}
 	// Uncloak after restoring opacity and clearing WS_EX_LAYERED so DWM presents the first fully composited frame atomically.
 	setWindowCloak(c.hwnd, false)
