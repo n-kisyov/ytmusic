@@ -449,10 +449,9 @@ func startupCBTHookProc(nCode int32, wParam uintptr, lParam unsafe.Pointer) uint
 				cbt.Lpcs.Y = initRect.Top
 				cbt.Lpcs.Cx = initRect.Right - initRect.Left
 				cbt.Lpcs.Cy = initRect.Bottom - initRect.Top
-				cbt.Lpcs.Style &^= int32(wsCaption | wsThickFrame | wsMaximizeBox)
 
 				style := getWindowLongPtr(wParam, gwlStyle)
-				setWindowLongPtr(wParam, gwlStyle, style&^(wsCaption|wsThickFrame|wsMaximizeBox))
+				setWindowLongPtr(wParam, gwlStyle, style&^(wsThickFrame|wsMaximizeBox))
 
 				// Subclass immediately so WM_SHOWWINDOW/WM_WINDOWPOSCHANGING applies WS_EX_LAYERED
 				// with alpha=0 after CreateWindowExW finishes and before ShowWindow draws a pixel.
