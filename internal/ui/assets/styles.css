@@ -515,22 +515,28 @@ html, body {
   border-bottom: 1px solid var(--yt-border);
 }
 
-.media-player-video,
-.video-screen {
+.video-canvas {
   width: 100%;
   height: 100%;
   display: block;
-  object-fit: contain;
   background: #000;
 }
 
-.video-pane:not(.open) .media-player-video,
-.media-player-video.master-hidden {
+/* Muted tiny decoder drawn onto #video-canvas so Chromium never acquires a VideoWakeLock that blocks Windows screen blanking. */
+.video-hidden-decoder {
   position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 9px;
+  opacity: 0.01;
   pointer-events: none;
+}
+
+.video-pane:not(.open) .video-hidden-decoder,
+.video-pane.page-hidden .video-hidden-decoder,
+#media-player {
+  display: none !important;
 }
 
 .video-quality-wrap {
