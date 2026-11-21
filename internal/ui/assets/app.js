@@ -884,7 +884,29 @@
     if (clearQueueBtn) {
       clearQueueBtn.classList.toggle('hidden', state.activeTab !== 'queue' || state.playlist.length === 0);
     }
-    if (appendCollectionBtn) {
+    if (clearQueueBtn) {
+    clearQueueBtn.addEventListener('click', async () => {
+      if (state.playlist.length === 0) return;
+      closeAddToPlaylistPopover();
+      state.playlist = [];
+      state.shuffleHistory = [];
+      state.shuffleBag = [];
+      state.currentIndex = -1;
+      state.userInitiatedPlay = false;
+      clearErrorSkipTimer();
+      stopPlaytimeTracker();
+      videoLoading.classList.add('hidden');
+      media.pause();
+      media.removeAttribute('src');
+      media.load();
+      updatePlayButtonUI();
+      renderActiveDrawerView(false);
+      await window.backendUpdatePlaylist([], -1).catch(() => {});
+      showToast('Queue cleared');
+    });
+  }
+
+  if (appendCollectionBtn) {
       appendCollectionBtn.classList.toggle('hidden', !canPlayCollection);
     }
     saveQueueBtn.classList.remove('hidden');
@@ -2248,6 +2270,28 @@
     }
   });
 
+  if (clearQueueBtn) {
+    clearQueueBtn.addEventListener('click', async () => {
+      if (state.playlist.length === 0) return;
+      closeAddToPlaylistPopover();
+      state.playlist = [];
+      state.shuffleHistory = [];
+      state.shuffleBag = [];
+      state.currentIndex = -1;
+      state.userInitiatedPlay = false;
+      clearErrorSkipTimer();
+      stopPlaytimeTracker();
+      videoLoading.classList.add('hidden');
+      media.pause();
+      media.removeAttribute('src');
+      media.load();
+      updatePlayButtonUI();
+      renderActiveDrawerView(false);
+      await window.backendUpdatePlaylist([], -1).catch(() => {});
+      showToast('Queue cleared');
+    });
+  }
+
   if (appendCollectionBtn) {
     appendCollectionBtn.addEventListener('click', async () => {
       closeAddToPlaylistPopover();
@@ -2336,6 +2380,15 @@
       saveQueueBar.classList.add('hidden');
     }
   });
+
+  if (addPlaylistOpenBtn) {
+    addPlaylistOpenBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (state.popoverTrack) {
+        openTrackExternal(state.popoverTrack);
+      }
+    });
+  }
 
   if (addPlaylistCopyBtn) {
     addPlaylistCopyBtn.addEventListener('click', (e) => {
@@ -2450,8 +2503,11 @@
     window.backendQuitApp();
   });
 
-  // Infinite Scroll Trigger on Playlist Bottom
+  // Infinite Scroll Trigger on Playlist Bottom (and close track popover if list scrolls)
   playlistScroll.addEventListener('scroll', () => {
+    if (addPlaylistPopover && !addPlaylistPopover.classList.contains('hidden')) {
+      closeAddToPlaylistPopover();
+    }
     if (state.activeTab !== 'queue' || state.filterQuery) return;
     if (state.isLoadingMore || state.playlist.length === 0) return;
     if (playlistScroll.scrollTop + playlistScroll.clientHeight >= playlistScroll.scrollHeight - 48) {
@@ -2571,6 +2627,10 @@
   });
 
   media.addEventListener('timeupdate', () => {
+    if (!media.paused && !media.ended) {
+      flushSessionPlayTime();
+      updatePlaytimeUI();
+    }
     if (state.isSeeking) return;
     const tr = state.playlist[state.currentIndex];
     const dur = Number.isFinite(media.duration) && media.duration > 0 ? media.duration : (tr ? tr.duration_sec : 0);
@@ -2690,7 +2750,13 @@
         if (eqBtn) eqBtn.click();
         break;
       case '?':
-        if (shortcutsPopover) shortcutsPopover.classList.toggle('hidden');
+        if (shortcutsPopover) {
+          if (shortcutsPopover.classList.contains('hidden')) {
+            positionFloatingPopover(shortcutsPopover, eqBtn);
+          } else {
+            shortcutsPopover.classList.add('hidden');
+          }
+        }
         break;
     }
   });
@@ -2734,8 +2800,41 @@
         }
         showToast('Sleep timer expired — paused');
         break;
+      case 'system_suspend':
+        stopPlaytimeTracker();
+        if (!media.paused) {
+          state.userInitiatedPlay = false;
+          media.pause();
+          updatePlayButtonUI();
+          pushPlaybackState();
+        }
+        break;
+      case 'system_resume':
+        if (!media.paused && !media.ended) {
+          startPlaytimeTracker();
+        }
+        break;
     }
   };
+
+  window.__onStatsReset = () => {
+    state.baseTotalPlaySec = 0;
+    state.sessionPlayMs = 0;
+    if (!media.paused && !media.ended) {
+      state.playAnchorMs = performance.now();
+    } else {
+      state.playAnchorMs = 0;
+    }
+    updatePlaytimeUI();
+    showToast('Listening stats cleared');
+  };
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && !media.paused && !media.ended) {
+      flushSessionPlayTime();
+      updatePlaytimeUI();
+    }
+  });
 
   window.__onAuthUpdated = (auth, silent = false) => {
     applyAuthUI(auth);
