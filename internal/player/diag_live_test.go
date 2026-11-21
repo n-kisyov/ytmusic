@@ -15,19 +15,22 @@ func TestDiagLiveStreams(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
 	defer cancel()
 
-	for _, cl := range innerTubeClients {
-		cat, err := r.fetchCatalogInnerTube(ctx, id, cl)
-		if err != nil {
-			fmt.Printf("client=%s err=%v\n", cl.name, err)
-			continue
-		}
+	cat, err := r.resolveCatalogWithInnerTube(ctx, id)
+	if err != nil {
+		fmt.Printf("innertube err=%v\n", err)
+	} else {
 		sel := SelectStreams(cat, true, 720)
-		fmt.Printf("client=%s audio=%d video=%d prog=%d selA=%d selV=%d\n",
-			cl.name, len(cat.AudioFormats), len(cat.VideoFormats), len(cat.Progressive),
-			findItag2(cat.AudioFormats, sel.AudioURL), findItag2(cat.VideoFormats, sel.VideoURL))
-		for _, rng := range []string{"bytes=0-1023", "bytes=0-65535", "bytes=0-", ""} {
-			testURL(ctx, r.client, cl.name+"-A", sel.AudioURL, cl.userAgent, rng)
-			testURL(ctx, r.client, cl.name+"-V", sel.VideoURL, cl.userAgent, rng)
+		fmt.Printf("innertube audio=%d video=%d prog=%d selA=%d selV=%d ua=%q\n",
+			len(cat.AudioFormats), len(cat.VideoFormats), len(cat.Progressive),
+			findItag2(cat.AudioFormats, sel.AudioURL), findItag2(cat.VideoFormats, sel.VideoURL), sel.AudioUserAgent)
+		for _, rng := range []string{"bytes=0-1", "bytes=0-1023", "bytes=0-65535", "bytes=0-", ""} {
+			testURL(ctx, r.httpClient, "IT-A", sel.AudioURL, sel.AudioUserAgent, rng)
+			testURL(ctx, r.httpClient, "IT-V", sel.VideoURL, sel.VideoUserAgent, rng)
+		}
+		if len(cat.Progressive) > 0 {
+			for _, rng := range []string{"bytes=0-1023", "bytes=0-", ""} {
+				testURL(ctx, r.httpClient, "IT-Prog", cat.Progressive[0].URL, cat.Progressive[0].UserAgent, rng)
+			}
 		}
 	}
 
@@ -37,12 +40,17 @@ func TestDiagLiveStreams(t *testing.T) {
 			fmt.Printf("ytdlp err=%v\n", err)
 		} else {
 			sel := SelectStreams(cat, true, 720)
-			fmt.Printf("client=ytdlp audio=%d video=%d prog=%d selA=%d selV=%d ua=%q\n",
+			fmt.Printf("ytdlp audio=%d video=%d prog=%d selA=%d selV=%d ua=%q\n",
 				len(cat.AudioFormats), len(cat.VideoFormats), len(cat.Progressive),
 				findItag2(cat.AudioFormats, sel.AudioURL), findItag2(cat.VideoFormats, sel.VideoURL), sel.AudioUserAgent)
 			for _, rng := range []string{"bytes=0-1023", "bytes=0-", ""} {
-				testURL(ctx, r.client, "ytdlp-A", sel.AudioURL, sel.AudioUserAgent, rng)
-				testURL(ctx, r.client, "ytdlp-V", sel.VideoURL, sel.VideoUserAgent, rng)
+				testURL(ctx, r.httpClient, "YTDLP-A", sel.AudioURL, sel.AudioUserAgent, rng)
+				testURL(ctx, r.httpClient, "YTDLP-V", sel.VideoURL, sel.VideoUserAgent, rng)
+			}
+			if len(cat.Progressive) > 0 {
+				for _, rng := range []string{"bytes=0-1023", "bytes=0-", ""} {
+					testURL(ctx, r.httpClient, "YTDLP-Prog", cat.Progressive[0].URL, cat.Progressive[0].UserAgent, rng)
+				}
 			}
 		}
 	}
