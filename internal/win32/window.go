@@ -30,6 +30,9 @@ const (
 	wmMButtonUp       = 0x0208
 	wmContextMenu     = 0x007B
 	wmDpiChanged      = 0x02E0
+	wmNcCalcSize      = 0x0083
+	wmNcLButtonDown   = 0x00A1
+	htCaption         = 2
 	wmTrayIcon        = 0x800A // WM_APP + 10 (avoids go-webview2's WM_APP = 0x8000)
 	wmRestoreApp      = 0x800B // WM_APP + 11 (posted by second instance to restore existing window)
 	wmResetStats      = 0x800C // WM_APP + 12 (posted by --reset-stats CLI flag)
@@ -51,6 +54,7 @@ const (
 	gwlExStyle = ^uintptr(19) // -20
 	gwlpWndProc = ^uintptr(3) // -4
 
+	wsCaption     = 0x00C00000
 	wsThickFrame  = 0x00040000
 	wsMaximizeBox = 0x00010000
 
